@@ -16,11 +16,11 @@ while True:
     if ret and not qr_code_read:
         ret_qr, decoded_info, points, _ = qcd.detectAndDecodeMulti(frame)
         if ret_qr:
-            for s, p in zip(decoded_info, points):
-                if s:
-                    print(s)
+            for url, p in zip(decoded_info, points):
+                if url:
+                    print(url)
                     # Abrir o link em um navegador
-                    # webbrowser.open(s)
+                    # webbrowser.open(url)
                     color = (0, 255, 0)
                     qr_code_read = True
                     
