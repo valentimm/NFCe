@@ -1,5 +1,6 @@
 import cv2
-import webbrowser
+import subprocess
+
 
 window_name = 'QR Code Detector'
 delay = 1
@@ -18,12 +19,11 @@ while True:
         if ret_qr:
             for url, p in zip(decoded_info, points):
                 if url:
-                    print(url)
-                    # Abrir o link em um navegador
-                    # webbrowser.open(url)
+                    # print(url)
                     color = (0, 255, 0)
                     qr_code_read = True
                     
+                    subprocess.run(["scrapy", "crawl", "nfcedata", "-a", f"url={url}"], cwd="nfceReader/nfceReader/spiders/")
                 else:
                     color = (0, 0, 255)
                 frame = cv2.polylines(frame, [p.astype(int)], True, color, 8)
