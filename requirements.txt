@@ -1,2 +1,3 @@
 opencv-python: 4.8.0.76
 scrapy       : 2.10.0
+numpy: 2.0.0
