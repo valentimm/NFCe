@@ -33,6 +33,10 @@ NFCe QRcode reader to simplify financial control
     ```bash
     source .nfce/bin/activate
     ```
+    or (Windows)
+    ```bash
+     .\.nfce\Scripts\activate
+    ```
 
 3. Install the requirements:
 
