@@ -25,7 +25,7 @@ NFCe QRcode reader to simplify financial control
 1. Create a virtual environment:
 
     ```bash
-    python3.11 -m venv .nfce
+    python -m venv .nfce
     ```
 
 2. Activate the virtual environment:
@@ -52,4 +52,6 @@ NFCe QRcode reader to simplify financial control
 
 5. Scan the QR code of the NFCes you want to organize
 
-6. The data will be saved in a CSV file named `nfc_data.csv` so you can import it to your financial control software or spreadsheet.
+6. When you finish, press `Q` to stop the script
+
+7. The data will be saved in a CSV file named `nfc_data.csv` so you can import it to your financial control software or spreadsheet.
