@@ -1,18 +1,19 @@
 import scrapy
 
+
 class NfcedataSpider(scrapy.Spider):
     name = "nfcedata"
     allowed_domains = ["www.fazenda.pr.gov.br"]
 
     # Configurações personalizadas
     custom_settings = {
-        'FEEDS': {
-            '../../../Items.csv': {'format': 'csv'},
+        "FEEDS": {
+            "../../../nfc_data.csv": {"format": "csv"},
         }
     }
-    
+
     def start_requests(self):
-        url = getattr(self, 'url', None)
+        url = getattr(self, "url", None)
         if url:
             yield scrapy.Request(url, callback=self.parse)
 
@@ -24,6 +25,6 @@ class NfcedataSpider(scrapy.Spider):
         # Itera pelos dados e gera os itens
         for name, valor in zip(names, valores):
             yield {
-                'name': name,
-                'valor': valor,
+                "name": name,
+                "valor": valor,
             }
