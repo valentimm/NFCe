@@ -1,6 +1,7 @@
 import cv2
 import subprocess
 import csv
+import os
 import time
 
 window_name = "QR Code Detector"
@@ -13,6 +14,14 @@ qcd = cv2.QRCodeDetector()
 
 qr_code_read = False  # Variável para ler apenas uma vez
 last_read_time = 0  # Timestamp da última leitura de QR code
+
+
+def create_or_clear_csv(file_path):
+    if not os.path.exists(file_path):
+        # Se o arquivo não existir, cria um novo com o cabeçalho
+        with open(file_path, mode="w", newline="", encoding="utf-8") as outfile:
+            writer = csv.writer(outfile)
+            writer.writerow(["name", "valor"])  # Cabeçalho do CSV
 
 
 def clean_csv(file_path):
@@ -30,6 +39,9 @@ def clean_csv(file_path):
 
 # Caminho do arquivo CSV
 csv_file = "nfc_data.csv"
+
+# Verifica e cria o arquivo CSV se necessário
+create_or_clear_csv(csv_file)
 
 while True:
     ret, frame = cap.read()
