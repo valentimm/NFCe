@@ -168,16 +168,9 @@ async function startQRScanner() {
         
         console.log('📸 Chamando scanner.start()...');
         
-        // Configurações de câmera melhoradas
-        const cameraConfig = { 
-            facingMode: "environment", // Câmera traseira
-            advanced: [{
-                zoom: 1.5 // Zoom para focar melhor no QR code
-            }]
-        };
-        
+        // Usar apenas facingMode (biblioteca aceita apenas 1 propriedade)
         await state.qrScanner.start(
-            cameraConfig,
+            { facingMode: "environment" }, // Câmera traseira
             config,
             onScanSuccess,
             onScanError
