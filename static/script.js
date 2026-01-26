@@ -1,5 +1,5 @@
 /**
- * NFCe Web Reader - Frontend JavaScript (Otimizado)
+ * NFCe Web Reader - Frontend JavaScript
  * Gerencia a interação do usuário e comunicação com a API
  */
 
@@ -50,6 +50,9 @@ console.log('🔧 Script carregado!');
 
 document.addEventListener('DOMContentLoaded', () => {
     console.log('🚀 DOM carregado - Inicializando aplicação...');
+    console.log('📱 Botão startScanBtn:', elements.startScanBtn);
+    console.log('📱 Botão stopScanBtn:', elements.stopScanBtn);
+    console.log('📱 Div qr-reader:', elements.qrReader);
     
     if (!elements.startScanBtn) {
         console.error('❌ Botão startScanBtn não encontrado!');
@@ -73,6 +76,9 @@ function initEventListeners() {
             console.log('🖱️ Botão Iniciar Scanner clicado!');
             startQRScanner();
         });
+        console.log('✅ Listener do startScanBtn registrado');
+    } else {
+        console.error('❌ startScanBtn não encontrado!');
     }
     
     if (elements.stopScanBtn) {
@@ -80,30 +86,33 @@ function initEventListeners() {
             console.log('🖱️ Botão Parar Scanner clicado!');
             stopQRScanner();
         });
+        console.log('✅ Listener do stopScanBtn registrado');
+    } else {
+        console.error('❌ stopScanBtn não encontrado!');
     }
     
     // Modal controls
-    if (elements.viewDataBtn) elements.viewDataBtn.addEventListener('click', openModal);
-    if (elements.closeModal) elements.closeModal.addEventListener('click', closeModal);
-    if (elements.modalOverlay) elements.modalOverlay.addEventListener('click', closeModal);
+    elements.viewDataBtn.addEventListener('click', openModal);
+    elements.closeModal.addEventListener('click', closeModal);
+    elements.modalOverlay.addEventListener('click', closeModal);
     
     // Actions
-    if (elements.downloadBtn) elements.downloadBtn.addEventListener('click', handleDownload);
-    if (elements.clearDataBtn) elements.clearDataBtn.addEventListener('click', handleClearData);
+    elements.downloadBtn.addEventListener('click', handleDownload);
+    elements.clearDataBtn.addEventListener('click', handleClearData);
     
     // Keyboard accessibility
     document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape' && elements.dataModal && elements.dataModal.style.display !== 'none') {
+        if (e.key === 'Escape' && elements.dataModal.style.display !== 'none') {
             closeModal();
         }
     });
 }
 
 /**
- * Iniciar scanner de QR code (OTIMIZADO PARA NFCE)
+ * Iniciar scanner de QR code
  */
 async function startQRScanner() {
-    console.log('🎬 Iniciando scanner QR Otimizado...');
+    console.log('🎬 Iniciando scanner QR...');
     
     try {
         clearAlerts();
@@ -115,45 +124,57 @@ async function startQRScanner() {
             return;
         }
         
+        // Verificar suporte a câmera
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            console.error('❌ Navigator.mediaDevices não disponível');
+            showAlert('❌ Seu navegador não suporta acesso à câmera.', 'error');
+            return;
+        }
+        
+        console.log('✅ Suporte à câmera verificado');
+        
         // Limpar placeholder
         elements.qrReader.innerHTML = '';
         
-        // --- CONFIGURAÇÃO OTIMIZADA ---
+        // Configurar scanner otimizado para QR codes pequenos
         const config = {
-            // FPS baixo (10-15) permite melhor exposição de luz por frame e 
-            // mais tempo de CPU para processar imagens de alta resolução
-            fps: 10, 
-            
+            fps: 30,
             qrbox: function(viewfinderWidth, viewfinderHeight) {
-                // Aumentado para 75% da tela (melhor usabilidade)
-                const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
-                const size = Math.floor(minEdge * 0.75);
+                // Área menor para melhor foco em QR codes pequenos
+                let minEdge = Math.min(viewfinderWidth, viewfinderHeight);
+                let qrboxSize = Math.floor(minEdge * 0.5); // Reduzido para 50%
                 return {
-                    width: size,
-                    height: size
+                    width: qrboxSize,
+                    height: qrboxSize
                 };
             },
-            // aspectRatio removido para usar o nativo do sensor
+            aspectRatio: 1.0,
+            disableFlip: false,
             videoConstraints: {
                 facingMode: "environment",
-                focusMode: "continuous",
-                // Forçar alta resolução (CRÍTICO para QR codes densos de notas)
-                width: { min: 1024, ideal: 1920, max: 3840 },
-                height: { min: 720, ideal: 1080, max: 2160 }
+                focusMode: "continuous", // Foco contínuo
+                advanced: [{ focusMode: "continuous" }]
             },
             experimentalFeatures: {
                 useBarCodeDetectorIfSupported: true
-            }
+            },
+            formatsToSupport: [
+                Html5QrcodeSupportedFormats.QR_CODE
+            ]
         };
         
         console.log('📋 Configuração do scanner:', config);
         
         state.qrScanner = new Html5Qrcode("qr-reader");
+        console.log('✅ Objeto Html5Qrcode criado');
         
-        showAlert('📷 Iniciando câmera em Alta Resolução...', 'info');
+        showAlert('📷 Solicitando acesso à câmera...', 'success');
         
+        console.log('📸 Chamando scanner.start()...');
+        
+        // Usar apenas facingMode (biblioteca aceita apenas 1 propriedade)
         await state.qrScanner.start(
-            { facingMode: "environment" },
+            { facingMode: "environment" }, // Câmera traseira
             config,
             onScanSuccess,
             onScanError
@@ -162,51 +183,74 @@ async function startQRScanner() {
         console.log('✅ Scanner iniciado com sucesso!');
         
         state.isScannerActive = true;
-        state.isProcessing = false;
-        
-        // UI Updates
+        state.isProcessing = false; // Resetar flag de processamento
         elements.startScanBtn.style.display = 'none';
         elements.stopScanBtn.style.display = 'inline-flex';
         elements.scanResult.style.display = 'none';
         
-        // Tentar ativar configurações avançadas (Flash/Zoom) após início
+        // Tentar ativar flash automaticamente
         setTimeout(async () => {
             try {
-                // Tenta aplicar foco contínuo novamente via constraints avançadas
-                const capabilities = state.qrScanner.getRunningTrackCameraCapabilities();
-                
-                if (state.qrScanner.applyVideoConstraints) {
-                     await state.qrScanner.applyVideoConstraints({
-                        focusMode: "continuous",
-                        advanced: [{ focusMode: "continuous" }]
-                     });
-                }
-
-                // Auto-activar flash se estiver muito escuro (opcional/hardware dependente)
-                // Se preferir botão manual, remova este bloco
-                if (capabilities && capabilities.torch) {
-                   // Apenas loga disponibilidade, não força ativação para não cegar o usuário
-                   console.log('💡 Flash disponível'); 
-                   showAlert('💡 Dica: Toque na tela para focar (se disponível)', 'info');
+                const track = state.qrScanner.getRunningTrackCameraCapabilities();
+                if (track && track.torch) {
+                    await track.applyConstraints({
+                        advanced: [{ torch: true }]
+                    });
+                    console.log('💡 Flash ativado automaticamente');
+                    showAlert('💡 Flash ativado para melhor leitura', 'success');
                 }
             } catch (e) {
-                console.log('⚠️ Ajustes finos de câmera não suportados:', e);
+                console.log('💡 Flash não disponível:', e.message);
+                // Tentar método alternativo
+                try {
+                    const tracks = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+                    const videoTrack = tracks.getVideoTracks()[0];
+                    const capabilities = videoTrack.getCapabilities();
+                    if (capabilities.torch) {
+                        await videoTrack.applyConstraints({
+                            advanced: [{ torch: true }]
+                        });
+                        console.log('💡 Flash ativado (método alternativo)');
+                    }
+                } catch (e2) {
+                    console.log('💡 Flash não suportado neste dispositivo');
+                }
             }
-        }, 800);
+        }, 1000);
+        
+        clearAlerts();
+        showAlert('✅ Scanner ativo! Mantenha o QR Code dentro do quadrado', 'success');
+        
+        // Adicionar dica após 3 segundos
+        setTimeout(() => {
+            if (state.isScannerActive) {
+                showAlert('💡 Dica: Aproxime ou afaste o celular até o QR ficar nítido', 'info');
+            }
+        }, 3000);
         
     } catch (err) {
         console.error('❌ Erro ao iniciar scanner:', err);
+        console.error('Tipo do erro:', err.name);
+        console.error('Mensagem:', err.message);
         
-        let errorMsg = 'Erro ao acessar câmera: ';
-        if (err.name === 'NotAllowedError') errorMsg = 'Permissão negada. Verifique as configurações.';
-        else if (err.name === 'NotFoundError') errorMsg = 'Nenhuma câmera encontrada.';
-        else if (err.name === 'NotReadableError') errorMsg = 'Câmera em uso por outro app.';
-        else errorMsg += err.message;
+        let errorMsg = '❌ Erro ao acessar câmera: ';
+        
+        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+            errorMsg += 'Permissão negada. Clique no ícone da câmera na barra de endereço e permita o acesso.';
+        } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+            errorMsg += 'Nenhuma câmera encontrada no dispositivo.';
+        } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+            errorMsg += 'Câmera já está em uso por outro aplicativo. Feche outros aplicativos de câmera.';
+        } else if (err.name === 'NotSupportedError') {
+            errorMsg += 'Acesso à câmera requer HTTPS. Use https://localhost ou faça deploy.';
+        } else {
+            errorMsg += err.message || 'Erro desconhecido. Verifique as permissões e tente novamente.';
+        }
         
         showAlert(errorMsg, 'error');
         
         // Restaurar placeholder
-        elements.qrReader.innerHTML = '<div class="qr-reader-placeholder"><div class="camera-icon">📷</div><p>Erro na câmera</p></div>';
+        elements.qrReader.innerHTML = '<div class="qr-reader-placeholder"><div class="camera-icon">📷</div><p>Erro ao iniciar câmera</p><small style="color: #666; margin-top: 8px;">' + err.message + '</small></div>';
     }
 }
 
@@ -222,6 +266,7 @@ async function stopQRScanner() {
             elements.startScanBtn.style.display = 'inline-flex';
             elements.stopScanBtn.style.display = 'none';
             
+            // Restaurar placeholder
             elements.qrReader.innerHTML = '<div class="qr-reader-placeholder"><div class="camera-icon">📷</div><p>Clique em "Iniciar Scanner" para começar</p></div>';
             
             showAlert('⏹️ Scanner parado', 'success');
@@ -235,36 +280,26 @@ async function stopQRScanner() {
  * Callback de sucesso do scanner
  */
 function onScanSuccess(decodedText, decodedResult) {
-    if (state.isProcessing) return;
+    // Evitar processar o mesmo código múltiplas vezes
+    if (state.isProcessing) {
+        console.log('⏳ Já processando um código, aguarde...');
+        return;
+    }
     
     console.log('✅ QR Code detectado:', decodedText);
     state.isProcessing = true;
     
-    // Feedback visual
+    // Feedback visual - NÃO para o scanner
     elements.scanResult.style.display = 'block';
     elements.scanResult.style.animation = 'pulse 0.5s ease';
     elements.scannedUrl.textContent = decodedText.substring(0, 50) + '...';
     
-    // Feedback tátil
-    if ('vibrate' in navigator) navigator.vibrate([200]);
+    // Feedback tátil (vibração)
+    if ('vibrate' in navigator) {
+        navigator.vibrate([200, 100, 200]);
+    }
     
     // Feedback sonoro
-    playBeep();
-    
-    processNFCe(decodedText);
-}
-
-/**
- * Callback de erro do scanner
- */
-function onScanError(error) {
-    // Ignora erros de frame vazio
-}
-
-/**
- * Helper para som
- */
-function playBeep() {
     try {
         const beep = new AudioContext();
         const oscillator = beep.createOscillator();
@@ -273,44 +308,85 @@ function playBeep() {
         gainNode.connect(beep.destination);
         oscillator.frequency.value = 800;
         oscillator.type = 'sine';
-        gainNode.gain.setValueAtTime(0.1, beep.currentTime);
+        gainNode.gain.setValueAtTime(0.3, beep.currentTime);
         oscillator.start(beep.currentTime);
         oscillator.stop(beep.currentTime + 0.1);
-    } catch (e) { /* Ignorar se falhar */ }
+    } catch (e) {
+        console.log('🔇 Som não disponível');
+    }
+    
+    // Processar NFCe (scanner continua rodando)
+    processNFCe(decodedText);
 }
+
+/**
+ * Callback de erro do scanner
+ */
+function onScanError(error) {
+    // Ignorar erros de "não encontrado" (são normais durante o scan)
+    // console.warn('Scanner error:', error);
+}
+    
+    // Modal controls
+    elements.viewDataBtn.addEventListener('click', openModal);
+    elements.closeModal.addEventListener('click', closeModal);
+    elements.modalOverlay.addEventListener('click', closeModal);
+    
+    // Actions
+    elements.downloadBtn.addEventListener('click', handleDownload);
+    elements.clearDataBtn.addEventListener('click', handleClearData);
+    
+    // Keyboard accessibility
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && elements.dataModal.style.display !== 'none') {
+            closeModal();
+        }
+    });
 
 /**
  * Processar NFCe usando Scrapy Spider
  */
 async function processNFCe(url) {
     clearAlerts();
-    showAlert('⏳ Processando NFCe... Aguarde.', 'info');
+    showAlert('⏳ Processando NFCe com Scrapy... Aguarde.', 'info');
+    
+    console.log('🕷️ Iniciando scraping para:', url);
     
     try {
         const response = await fetch('/api/process', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'Content-Type': 'application/json',
+            },
             body: JSON.stringify({ url })
         });
         
         const data = await response.json();
         
-        if (!response.ok) throw new Error(data.error || 'Erro ao processar NFCe');
+        if (!response.ok) {
+            throw new Error(data.error || 'Erro ao processar NFCe');
+        }
         
-        showAlert('✅ Sucesso! Aguarde 3s para próxima...', 'success');
+        console.log('✅ Spider executada com sucesso');
+        showAlert('✅ NFCe processada! Aguarde 3s para escanear próxima...', 'success');
+        
+        // Atualizar estatísticas
         await loadStats();
         
+        // Ocultar resultado após 3 segundos e permitir nova leitura
         setTimeout(() => {
             elements.scanResult.style.display = 'none';
             state.isProcessing = false;
             if (state.isScannerActive) {
-                showAlert('📷 Pronto para próximo QR Code', 'success');
+                showAlert('📷 Pronto para escanear próximo QR Code', 'success');
             }
         }, 3000);
         
     } catch (error) {
-        console.error('❌ Erro:', error);
+        console.error('❌ Erro ao processar:', error);
         showAlert(`❌ ${error.message}`, 'error');
+        
+        // Permitir nova tentativa após erro
         setTimeout(() => {
             state.isProcessing = false;
             elements.scanResult.style.display = 'none';
@@ -326,14 +402,17 @@ async function loadStats() {
         const response = await fetch('/api/stats');
         const data = await response.json();
         
-        if (data.success && data.stats) {
-            animateNumber(elements.statItems, data.stats.total_items);
-            animateNumber(elements.statValue, data.stats.total_value, true);
-            animateNumber(elements.statStores, data.stats.stores.length);
-            animateNumber(elements.statDiscount, data.stats.total_discount, true);
+        if (data.success) {
+            const stats = data.stats;
+            
+            // Animar números
+            animateNumber(elements.statItems, stats.total_items);
+            animateNumber(elements.statValue, stats.total_value, true);
+            animateNumber(elements.statStores, stats.stores.length);
+            animateNumber(elements.statDiscount, stats.total_discount, true);
         }
     } catch (error) {
-        console.error('Erro stats:', error);
+        console.error('Erro ao carregar estatísticas:', error);
     }
 }
 
@@ -341,7 +420,6 @@ async function loadStats() {
  * Animar números
  */
 function animateNumber(element, targetValue, isCurrency = false) {
-    if(!element) return;
     const duration = 1000;
     const start = parseFloat(element.textContent.replace(/[^\d,.-]/g, '').replace(',', '.')) || 0;
     const end = targetValue;
@@ -350,26 +428,43 @@ function animateNumber(element, targetValue, isCurrency = false) {
     function update(currentTime) {
         const elapsed = currentTime - startTime;
         const progress = Math.min(elapsed / duration, 1);
+        
+        // Easing function (easeOutCubic)
         const easeProgress = 1 - Math.pow(1 - progress, 3);
         const current = start + (end - start) * easeProgress;
         
-        element.textContent = isCurrency ? formatCurrency(current) : Math.round(current).toString();
+        if (isCurrency) {
+            element.textContent = formatCurrency(current);
+        } else {
+            element.textContent = Math.round(current).toString();
+        }
         
-        if (progress < 1) requestAnimationFrame(update);
+        if (progress < 1) {
+            requestAnimationFrame(update);
+        }
     }
+    
     requestAnimationFrame(update);
 }
 
+/**
+ * Formatar valor monetário
+ */
 function formatCurrency(value) {
-    return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
+    return new Intl.NumberFormat('pt-BR', {
+        style: 'currency',
+        currency: 'BRL'
+    }).format(value);
 }
 
 /**
- * Modal e Tabela
+ * Abrir modal com dados
  */
 async function openModal() {
     elements.dataModal.style.display = 'flex';
     document.body.style.overflow = 'hidden';
+    
+    // Mostrar loading
     elements.loadingTable.style.display = 'flex';
     elements.emptyState.style.display = 'none';
     elements.tableWrapper.style.display = 'none';
@@ -380,52 +475,68 @@ async function openModal() {
         
         if (result.success) {
             state.currentData = result.data;
+            
             if (result.data.length === 0) {
+                // Mostrar estado vazio
                 elements.loadingTable.style.display = 'none';
                 elements.emptyState.style.display = 'flex';
             } else {
+                // Mostrar tabela
                 renderTable(result.data);
                 elements.loadingTable.style.display = 'none';
                 elements.tableWrapper.style.display = 'block';
             }
         } else {
-            showAlert(`Erro: ${result.message}`, 'error');
+            showAlert(`Erro ao carregar dados: ${result.message}`, 'error');
             closeModal();
         }
     } catch (error) {
-        showAlert('Erro de conexão.', 'error');
+        console.error('Erro ao carregar dados:', error);
+        showAlert('Erro ao carregar dados do servidor.', 'error');
         closeModal();
     }
 }
 
+/**
+ * Renderizar tabela de dados
+ */
 function renderTable(data) {
     elements.dataTableBody.innerHTML = '';
+    
     data.forEach((row, index) => {
         const tr = document.createElement('tr');
         tr.style.animationDelay = `${index * 0.02}s`;
+        
         tr.innerHTML = `
             <td><strong>${escapeHtml(row.Estabelecimento || 'N/A')}</strong></td>
             <td>${escapeHtml(row.Produto || 'N/A')}</td>
             <td>${escapeHtml(row.Quantidade || 'N/A')}</td>
             <td>${escapeHtml(row.Unidade || 'N/A')}</td>
             <td><strong>${escapeHtml(row.Valor_Total || 'N/A')}</strong></td>
-            <td style="color: ${row.Desconto ? 'var(--success)' : 'var(--gray-400)'}">${escapeHtml(row.Desconto || '-')}</td>
+            <td style="color: ${row.Desconto ? 'var(--success)' : 'var(--gray-400)'}">
+                ${escapeHtml(row.Desconto || '-')}
+            </td>
         `;
+        
         elements.dataTableBody.appendChild(tr);
     });
 }
 
+/**
+ * Fechar modal
+ */
 function closeModal() {
     elements.dataModal.style.display = 'none';
     document.body.style.overflow = '';
 }
 
 /**
- * Utils: Download, Clear, Alerts
+ * Download CSV
  */
 async function handleDownload() {
     try {
         const response = await fetch('/api/download');
+        
         if (response.ok) {
             const blob = await response.blob();
             const url = window.URL.createObjectURL(blob);
@@ -435,45 +546,118 @@ async function handleDownload() {
             document.body.appendChild(a);
             a.click();
             window.URL.revokeObjectURL(url);
-            a.remove();
-            showAlert('✅ Download iniciado!', 'success');
+            document.body.removeChild(a);
+            
+            showAlert('✅ Download iniciado com sucesso!', 'success');
         } else {
             const data = await response.json();
-            showAlert(`❌ ${data.message}`, 'error');
+            showAlert(`❌ Erro: ${data.message}`, 'error');
         }
-    } catch (error) { showAlert('❌ Erro no download.', 'error'); }
+    } catch (error) {
+        console.error('Erro ao fazer download:', error);
+        showAlert('❌ Erro ao fazer download do arquivo.', 'error');
+    }
 }
 
+/**
+ * Limpar dados
+ */
 async function handleClearData() {
-    if (!confirm('⚠️ Limpar TODOS os dados?')) return;
+    if (!confirm('⚠️ Tem certeza que deseja limpar TODOS os dados? Esta ação não pode ser desfeita!')) {
+        return;
+    }
+    
     try {
-        const response = await fetch('/api/clear', { method: 'POST' });
+        const response = await fetch('/api/clear', {
+            method: 'POST'
+        });
+        
         const data = await response.json();
+        
         if (data.success) {
-            showAlert('✅ Dados limpos!', 'success');
+            showAlert('✅ Dados limpos com sucesso!', 'success');
             closeModal();
-            loadStats();
+            await loadStats();
         } else {
-            showAlert(`❌ ${data.message}`, 'error');
+            showAlert(`❌ Erro: ${data.message}`, 'error');
         }
-    } catch (error) { showAlert('❌ Erro ao limpar.', 'error'); }
+    } catch (error) {
+        console.error('Erro ao limpar dados:', error);
+        showAlert('❌ Erro ao limpar dados.', 'error');
+    }
 }
 
+/**
+ * Mostrar alerta
+ */
 function showAlert(message, type = 'success') {
     const alert = document.createElement('div');
     alert.className = `alert alert-${type}`;
-    alert.innerHTML = `<span class="alert-icon">${type === 'success' ? '✅' : '❌'}</span><span>${message}</span><button class="alert-close">×</button>`;
+    alert.setAttribute('role', 'alert');
     
-    alert.querySelector('.alert-close').addEventListener('click', () => alert.remove());
+    const icon = type === 'success' ? '✅' : '❌';
+    
+    alert.innerHTML = `
+        <span class="alert-icon">${icon}</span>
+        <span>${message}</span>
+        <button class="alert-close" aria-label="Fechar alerta">×</button>
+    `;
+    
+    const closeBtn = alert.querySelector('.alert-close');
+    closeBtn.addEventListener('click', () => {
+        alert.remove();
+    });
+    
     elements.alertContainer.appendChild(alert);
-    setTimeout(() => { if (alert.parentElement) alert.remove(); }, 5000);
+    
+    // Auto-remover após 5 segundos
+    setTimeout(() => {
+        if (alert.parentElement) {
+            alert.style.opacity = '0';
+            setTimeout(() => alert.remove(), 300);
+        }
+    }, 5000);
 }
 
-function clearAlerts() { elements.alertContainer.innerHTML = ''; }
+/**
+ * Limpar todos os alertas
+ */
+function clearAlerts() {
+    elements.alertContainer.innerHTML = '';
+}
 
+/**
+ * Definir estado de loading do botão
+ */
+function setButtonLoading(isLoading) {
+    elements.processBtn.disabled = isLoading;
+    
+    if (isLoading) {
+        elements.btnText.style.display = 'none';
+        elements.btnLoading.style.display = 'flex';
+    } else {
+        elements.btnText.style.display = 'block';
+        elements.btnLoading.style.display = 'none';
+    }
+}
+
+/**
+ * Escape HTML para prevenir XSS
+ */
 function escapeHtml(text) {
-    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
+    const map = {
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#039;'
+    };
     return text.toString().replace(/[&<>"']/g, m => map[m]);
 }
 
-if ('serviceWorker' in navigator) console.log('✅ PWA Support Ready');
+/**
+ * Detectar suporte a Service Worker (para PWA futuro)
+ */
+if ('serviceWorker' in navigator) {
+    console.log('✅ Service Worker suportado - PWA disponível');
+}
