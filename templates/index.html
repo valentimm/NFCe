@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Leitor de NFCe - Controle suas notas fiscais de forma simples e eficiente">
+    <title>NFCe Web Reader - Controle Fiscal Inteligente</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Html5-QRCode Library -->
+    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+</head>
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="container">
+            <div class="header-content">
+                <h1 class="logo">
+                    <span class="logo-icon">📋</span>
+                    NFCe Reader
+                </h1>
+                <nav class="nav" role="navigation" aria-label="Menu principal">
+                    <button class="btn btn-outline" id="viewDataBtn" aria-label="Visualizar dados salvos">
+                        <span class="icon">📊</span>
+                        <span>Ver Dados</span>
+                    </button>
+                    <button class="btn btn-success" id="downloadBtn" aria-label="Baixar arquivo CSV">
+                        <span class="icon">⬇️</span>
+                        <span>Download CSV</span>
+                    </button>
+                </nav>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="main">
+        <div class="container">
+            <!-- Hero Section -->
+            <section class="hero">
+                <div class="hero-content">
+                    <h2 class="hero-title">Controle Financeiro Simplificado</h2>
+                    <p class="hero-description">
+                        Cole a URL da sua nota fiscal NFCe e deixe a tecnologia organizar seus dados automaticamente.
+                    </p>
+                </div>
+
+                <!-- Stats Cards -->
+                <div class="stats-grid" id="statsGrid">
+                    <div class="stat-card">
+                        <div class="stat-icon">🛒</div>
+                        <div class="stat-content">
+                            <div class="stat-value" id="statItems">0</div>
+                            <div class="stat-label">Produtos</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">💰</div>
+                        <div class="stat-content">
+                            <div class="stat-value" id="statValue">R$ 0,00</div>
+                            <div class="stat-label">Total Gasto</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">🏪</div>
+                        <div class="stat-content">
+                            <div class="stat-value" id="statStores">0</div>
+                            <div class="stat-label">Estabelecimentos</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">🎁</div>
+                        <div class="stat-content">
+                            <div class="stat-value" id="statDiscount">R$ 0,00</div>
+                            <div class="stat-label">Descontos</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Input Section -->
+            <section class="input-section">
+                <!-- QR Scanner -->
+                <div class="scanner-container">
+                    <div class="scanner-header">
+                        <h3>📷 Escaneie o QR Code da NFCe</h3>
+                        <p>Posicione o QR Code da sua nota fiscal na câmera</p>
+                    </div>
+                    <div id="qr-reader" class="qr-reader">
+                        <div class="qr-reader-placeholder">
+                            <div class="camera-icon">📷</div>
+                            <p>Clique em "Iniciar Scanner" para começar</p>
+                        </div>
+                    </div>
+                    <div class="scanner-controls">
+                        <button type="button" class="btn btn-danger" id="stopScanBtn" style="display: none;">
+                            <span class="icon">⏹️</span>
+                            Parar Scanner
+                        </button>
+                        <button type="button" class="btn btn-primary btn-lg" id="startScanBtn">
+                            <span class="icon">📷</span>
+                            Iniciar Scanner
+                        </button>
+                    </div>
+                    <div id="scanResult" class="scan-result" style="display: none;">
+                        <div class="result-icon">✅</div>
+                        <p>QR Code detectado!</p>
+                        <small id="scannedUrl"></small>
+                    </div>
+                </div>
+
+                <!-- Alert Messages -->
+                <div id="alertContainer" role="alert" aria-live="polite"></div>
+
+                <!-- How to Use -->
+                <div class="info-card">
+                    <h3 class="info-title">📱 Como usar:</h3>
+                    <ol class="info-list">
+                        <li>Clique em <strong>"Iniciar Scanner"</strong> para ativar a câmera</li>
+                        <li>Permita o acesso à câmera quando solicitado</li>
+                        <li>Aponte a câmera para o <strong>QR Code</strong> da sua nota fiscal</li>
+                        <li>A NFCe será <strong>processada automaticamente</strong> quando detectada</li>
+                        <li>Veja as estatísticas atualizadas e use "Ver Dados" para visualizar tudo</li>
+                    </ol>
+                    <div class="info-tip">
+                        <strong>💡 Dica:</strong> Em celulares, a câmera traseira é usada automaticamente para melhor leitura!
+                    </div>
+                </div>
+                    <div class="info-tip">
+                        <strong>💡 Dica:</strong> Em celulares, a câmera traseira é usada automaticamente para melhor leitura do QR Code!
+                    </div>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <!-- Data Modal -->
+    <div id="dataModal" class="modal" role="dialog" aria-labelledby="modalTitle" aria-modal="true" style="display: none;">
+        <div class="modal-overlay" id="modalOverlay"></div>
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="modalTitle" class="modal-title">📊 Dados Salvos</h2>
+                <div class="modal-actions">
+                    <button class="btn btn-danger btn-sm" id="clearDataBtn" aria-label="Limpar todos os dados">
+                        🗑️ Limpar Tudo
+                    </button>
+                    <button class="modal-close" id="closeModal" aria-label="Fechar modal">✕</button>
+                </div>
+            </div>
+            <div class="modal-body">
+                <div class="table-container">
+                    <div id="loadingTable" class="loading-state">
+                        <div class="spinner"></div>
+                        <p>Carregando dados...</p>
+                    </div>
+                    <div id="emptyState" class="empty-state" style="display: none;">
+                        <div class="empty-icon">📭</div>
+                        <h3>Nenhum dado encontrado</h3>
+                        <p>Processe uma NFCe para começar</p>
+                    </div>
+                    <div id="tableWrapper" style="display: none;">
+                        <table class="data-table" role="table">
+                            <thead>
+                                <tr>
+                                    <th scope="col">Estabelecimento</th>
+                                    <th scope="col">Produto</th>
+                                    <th scope="col">Quantidade</th>
+                                    <th scope="col">Unidade</th>
+                                    <th scope="col">Valor Total</th>
+                                    <th scope="col">Desconto</th>
+                                </tr>
+                            </thead>
+                            <tbody id="dataTableBody">
+                                <!-- Data will be inserted here -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="container">
+            <p class="footer-text">
+                Desenvolvido com ❤️ para facilitar seu controle financeiro
+            </p>
+        </div>
+    </footer>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

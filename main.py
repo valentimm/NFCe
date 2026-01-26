@@ -1,86 +1,58 @@
 import cv2
+from pyzbar import pyzbar
 import subprocess
 import csv
 import os
 import time
 
-window_name = "QR Code Detector"
-delay = 1
-reset_delay = 5  # Tempo em segundos para permitir a leitura de um novo QR code
-
-# Video capture object
-cap = cv2.VideoCapture(1)  # Ajuste para sua câmera
-qcd = cv2.QRCodeDetector()
-
-qr_code_read = False  # Variável para ler apenas uma vez
-last_read_time = 0  # Timestamp da última leitura de QR code
-
-
-def create_or_clear_csv(file_path):
-    if not os.path.exists(file_path):
-        # Se o arquivo não existir, cria um novo com o cabeçalho
-        with open(file_path, mode="w", newline="", encoding="utf-8") as outfile:
-            writer = csv.writer(outfile)
-            writer.writerow(["name", "valor"])  # Cabeçalho do CSV
-
-
-def clean_csv(file_path):
-    # Abrir o arquivo CSV para leitura
-    with open(file_path, mode="r", newline="", encoding="utf-8") as infile:
-        reader = csv.reader(infile)
-        # Criar uma lista de linhas que não contenham 'name,valor'
-        rows = [row for row in reader if "name,valor" not in ",".join(row)]
-
-    # Abrir o arquivo CSV para escrita
-    with open(file_path, mode="w", newline="", encoding="utf-8") as outfile:
-        writer = csv.writer(outfile)
-        writer.writerows(rows)
-
-
-# Caminho do arquivo CSV
+# Configurações
+cap = cv2.VideoCapture(1) 
+reset_delay = 5 
+last_read_time = 0
 csv_file = "nfc_data.csv"
 
-# Verifica e cria o arquivo CSV se necessário
-create_or_clear_csv(csv_file)
+def init_csv():
+    # Cria o arquivo com cabeçalho se ele não existir
+    if not os.path.exists(csv_file):
+        with open(csv_file, mode="w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f, delimiter=';')
+            # Nova coluna "Desconto" adicionada ao final
+            writer.writerow(["Estabelecimento", "Produto", "Quantidade", "Unidade", "Valor_Total", "Desconto"])
+        print("[*] Planilha inicializada com a coluna Desconto.")
+
+init_csv()
+print("Iniciando leitor... Pressione 'q' para sair.")
 
 while True:
     ret, frame = cap.read()
+    if not ret:
+        continue
 
-    if ret:
-        current_time = time.time()
-        if not qr_code_read or (current_time - last_read_time > reset_delay):
-            ret_qr, decoded_info, points, _ = qcd.detectAndDecodeMulti(frame)
-            if ret_qr:
-                for url, p in zip(decoded_info, points):
-                    if url:
-                        color = (0, 255, 0)
-                        qr_code_read = True
-                        last_read_time = current_time
-                        cv2.putText(
-                            frame,
-                            "QR Code lido!",
-                            (50, 50),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            1,
-                            (0, 255, 0),
-                            2,
-                            cv2.LINE_AA,
-                        )
-                        subprocess.run(
-                            ["scrapy", "crawl", "nfcedata", "-a", f"url={url}"],
-                            cwd="nfceReader/nfceReader/spiders/",
-                        )
-                    else:
-                        color = (0, 0, 255)
-                    frame = cv2.polylines(frame, [p.astype(int)], True, color, 8)
-            cv2.imshow(window_name, frame)
+    qrcodes = pyzbar.decode(frame)
+    current_time = time.time()
 
-    key = cv2.waitKey(delay) & 0xFF
-    if key == ord("q"):
+    for qrcode in qrcodes:
+        url = qrcode.data.decode('utf-8')
+        
+        if current_time - last_read_time > reset_delay:
+            print(f"[+] Lendo Nota Fiscal...")
+            last_read_time = current_time
+
+            (x, y, w, h) = qrcode.rect
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 4)
+
+            # Proteção da URL com aspas para o Windows não travar no caractere '|'
+            comando = f'scrapy crawl nfcedata -a url="{url}"'
+            
+            subprocess.Popen(
+                comando,
+                cwd="nfceReader/",
+                shell=True
+            )
+
+    cv2.imshow("Leitor NFCe", frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
 cap.release()
 cv2.destroyAllWindows()
-
-# Limpar o arquivo CSV após terminar a leitura dos QR codes
-clean_csv(csv_file)
