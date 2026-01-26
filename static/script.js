@@ -102,56 +102,55 @@ function initEventListeners() {
 /**
  * Iniciar scanner de QR code (OTIMIZADO PARA NFCE)
  */
+/**
+ * Iniciar scanner de QR code (MODO COMPATIBILIDADE)
+ */
 async function startQRScanner() {
-    console.log('🎬 Iniciando scanner QR Otimizado...');
+    console.log('🎬 Iniciando scanner QR (Modo Seguro)...');
     
     try {
         clearAlerts();
         
-        // Verificar se Html5Qrcode está disponível
         if (typeof Html5Qrcode === 'undefined') {
-            console.error('❌ Biblioteca Html5Qrcode não carregada!');
-            showAlert('❌ Erro: Biblioteca de scanner não carregada. Recarregue a página.', 'error');
+            showAlert('❌ Erro: Biblioteca não carregada.', 'error');
             return;
         }
         
-        // Limpar placeholder
         elements.qrReader.innerHTML = '';
         
-        // --- CONFIGURAÇÃO OTIMIZADA ---
+        // --- MUDANÇA PRINCIPAL AQUI ---
+        // Usamos uma configuração mais leve para garantir que funciona em todos os celulares
         const config = {
-            // FPS baixo (10-15) permite melhor exposição de luz por frame e 
-            // mais tempo de CPU para processar imagens de alta resolução
-            fps: 10, 
-            
+            fps: 10, // Mantemos FPS baixo para dar tempo de processar
             qrbox: function(viewfinderWidth, viewfinderHeight) {
-                // Aumentado para 75% da tela (melhor usabilidade)
+                // Caixa de leitura de 70% da tela
                 const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
-                const size = Math.floor(minEdge * 0.75);
+                const size = Math.floor(minEdge * 0.7);
                 return {
                     width: size,
                     height: size
                 };
             },
-            // aspectRatio removido para usar o nativo do sensor
             videoConstraints: {
                 facingMode: "environment",
-                focusMode: "continuous",
-                // Forçar alta resolução (CRÍTICO para QR codes densos de notas)
-                width: { min: 1024, ideal: 1920, max: 3840 },
-                height: { min: 720, ideal: 1080, max: 2160 }
+                // MUDANÇA: Usamos apenas 'ideal', removemos 'min/max'
+                // Isso diz: "Tente 1080p, mas se não der, abra o que tiver"
+                width: { ideal: 1280 }, 
+                height: { ideal: 720 },
+                // Tenta focar, mas não quebra se não suportar
+                focusMode: "continuous"
             },
+            // Desativamos recursos experimentais que podem travar iPhones
             experimentalFeatures: {
-                useBarCodeDetectorIfSupported: true
+                useBarCodeDetectorIfSupported: false
             }
         };
         
-        console.log('📋 Configuração do scanner:', config);
-        
         state.qrScanner = new Html5Qrcode("qr-reader");
         
-        showAlert('📷 Iniciando câmera em Alta Resolução...', 'info');
+        showAlert('📷 Iniciando câmera...', 'info');
         
+        // Iniciamos o scanner
         await state.qrScanner.start(
             { facingMode: "environment" },
             config,
@@ -159,54 +158,61 @@ async function startQRScanner() {
             onScanError
         );
         
-        console.log('✅ Scanner iniciado com sucesso!');
+        console.log('✅ Scanner iniciado!');
         
         state.isScannerActive = true;
         state.isProcessing = false;
         
-        // UI Updates
         elements.startScanBtn.style.display = 'none';
         elements.stopScanBtn.style.display = 'inline-flex';
         elements.scanResult.style.display = 'none';
         
-        // Tentar ativar configurações avançadas (Flash/Zoom) após início
-        setTimeout(async () => {
+        showAlert('✅ Câmera ativa! Aproxime o QR Code.', 'success');
+        
+        // Tenta aplicar foco forçado após 1 segundo (hack para Androids)
+        setTimeout(() => {
             try {
-                // Tenta aplicar foco contínuo novamente via constraints avançadas
                 const capabilities = state.qrScanner.getRunningTrackCameraCapabilities();
-                
-                if (state.qrScanner.applyVideoConstraints) {
-                     await state.qrScanner.applyVideoConstraints({
-                        focusMode: "continuous",
-                        advanced: [{ focusMode: "continuous" }]
-                     });
-                }
-
-                // Auto-activar flash se estiver muito escuro (opcional/hardware dependente)
-                // Se preferir botão manual, remova este bloco
+                // Se suportar torch (flash), avisa o usuário ou ativa botão
                 if (capabilities && capabilities.torch) {
-                   // Apenas loga disponibilidade, não força ativação para não cegar o usuário
-                   console.log('💡 Flash disponível'); 
-                   showAlert('💡 Dica: Toque na tela para focar (se disponível)', 'info');
+                    console.log('Flash disponível');
                 }
+                // Tenta focar novamente
+                state.qrScanner.applyVideoConstraints({ focusMode: "continuous" })
+                    .catch(err => console.log('Foco contínuo não suportado nativamente'));
             } catch (e) {
-                console.log('⚠️ Ajustes finos de câmera não suportados:', e);
+                // Ignora erros de ajuste fino
             }
-        }, 800);
+        }, 1000);
         
     } catch (err) {
-        console.error('❌ Erro ao iniciar scanner:', err);
+        console.error('❌ Erro crítico:', err);
         
-        let errorMsg = 'Erro ao acessar câmera: ';
-        if (err.name === 'NotAllowedError') errorMsg = 'Permissão negada. Verifique as configurações.';
-        else if (err.name === 'NotFoundError') errorMsg = 'Nenhuma câmera encontrada.';
-        else if (err.name === 'NotReadableError') errorMsg = 'Câmera em uso por outro app.';
+        // Se falhar, tentamos o modo MAIS BÁSICO possível (último recurso)
+        if (state.qrScanner && !state.isScannerActive) {
+            console.log('⚠️ Tentando reiniciar em modo VGA básico...');
+            try {
+                await state.qrScanner.start(
+                    { facingMode: "environment" },
+                    { fps: 10, qrbox: 250 }, // Configuração padrão da lib
+                    onScanSuccess,
+                    onScanError
+                );
+                state.isScannerActive = true;
+                showAlert('⚠️ Modo básico ativado (baixa resolução). Aproxime bem o celular.', 'warning');
+                return; // Salvou!
+            } catch (err2) {
+                console.error('Falha total', err2);
+            }
+        }
+
+        let errorMsg = 'Erro na câmera. ';
+        if (err.name === 'NotAllowedError') errorMsg += 'Verifique permissões.';
+        else if (err.name === 'NotFoundError') errorMsg += 'Câmera não encontrada.';
         else errorMsg += err.message;
         
         showAlert(errorMsg, 'error');
-        
-        // Restaurar placeholder
-        elements.qrReader.innerHTML = '<div class="qr-reader-placeholder"><div class="camera-icon">📷</div><p>Erro na câmera</p></div>';
+        elements.qrReader.innerHTML = '<div class="qr-reader-placeholder"><p>❌ Erro de câmera</p></div>';
     }
 }
 
