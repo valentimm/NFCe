@@ -177,33 +177,13 @@ async function startQRScanner() {
         
         console.log('📸 Chamando scanner.start()...');
         
-        // Configurar câmera com resolução HD e flash
-        const cameraConstraints = {
-            facingMode: { exact: "environment" },
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
-            focusMode: { ideal: "continuous" },
-            torch: true // Tentar ativar flash
-        };
-        
-        try {
-            // Tentar com todas as configurações
-            await state.qrScanner.start(
-                cameraConstraints,
-                config,
-                onScanSuccess,
-                onScanError
-            );
-        } catch (e) {
-            console.log('⚠️ Tentando sem flash...', e.message);
-            // Fallback sem flash
-            await state.qrScanner.start(
-                { facingMode: "environment" },
-                config,
-                onScanSuccess,
-                onScanError
-            );
-        }
+        // Iniciar com configuração simples (flash será ativado depois)
+        await state.qrScanner.start(
+            { facingMode: "environment" },
+            config,
+            onScanSuccess,
+            onScanError
+        );
         
         console.log('✅ Scanner iniciado com sucesso!');
         
