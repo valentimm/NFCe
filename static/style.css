@@ -393,6 +393,18 @@ body {
     gap: var(--spacing-md);
     justify-content: center;
     margin-top: var(--spacing-lg);
+    flex-wrap: wrap;
+}
+
+.scanner-controls .btn.active {
+    background: var(--warning);
+    border-color: var(--warning);
+    color: white;
+}
+
+.scanner-controls .btn.active:hover {
+    background: #e6a800;
+    border-color: #e6a800;
 }
 
 .scan-result {

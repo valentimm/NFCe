@@ -8,7 +8,9 @@ const state = {
     isProcessing: false,
     currentData: [],
     qrScanner: null,
-    isScannerActive: false
+    isScannerActive: false,
+    isFlashOn: false,
+    videoTrack: null
 };
 
 // Elementos do DOM
@@ -19,6 +21,7 @@ const elements = {
     qrReader: document.getElementById('qr-reader'),
     startScanBtn: document.getElementById('startScanBtn'),
     stopScanBtn: document.getElementById('stopScanBtn'),
+    toggleFlashBtn: document.getElementById('toggleFlashBtn'),
     scanResult: document.getElementById('scanResult'),
     scannedUrl: document.getElementById('scannedUrl'),
     
@@ -91,6 +94,12 @@ function initEventListeners() {
         console.error('❌ stopScanBtn não encontrado!');
     }
     
+    // Flash toggle
+    if (elements.toggleFlashBtn) {
+        elements.toggleFlashBtn.addEventListener('click', toggleFlash);
+        console.log('✅ Listener do toggleFlashBtn registrado');
+    }
+    
     // Modal controls
     elements.viewDataBtn.addEventListener('click', openModal);
     elements.closeModal.addEventListener('click', closeModal);
@@ -138,11 +147,11 @@ async function startQRScanner() {
         
         // Configurar scanner otimizado para QR codes pequenos
         const config = {
-            fps: 30,
+            fps: 10, // Reduzido para melhor processamento
             qrbox: function(viewfinderWidth, viewfinderHeight) {
-                // Área menor para melhor foco em QR codes pequenos
+                // Área flexível - menor é melhor para QR pequenos
                 let minEdge = Math.min(viewfinderWidth, viewfinderHeight);
-                let qrboxSize = Math.floor(minEdge * 0.5); // Reduzido para 50%
+                let qrboxSize = Math.floor(minEdge * 0.6);
                 return {
                     width: qrboxSize,
                     height: qrboxSize
@@ -150,17 +159,13 @@ async function startQRScanner() {
             },
             aspectRatio: 1.0,
             disableFlip: false,
-            videoConstraints: {
-                facingMode: "environment",
-                focusMode: "continuous", // Foco contínuo
-                advanced: [{ focusMode: "continuous" }]
-            },
             experimentalFeatures: {
                 useBarCodeDetectorIfSupported: true
             },
             formatsToSupport: [
                 Html5QrcodeSupportedFormats.QR_CODE
-            ]
+            ],
+            // Sem videoConstraints aqui - vai no cameraId
         };
         
         console.log('📋 Configuração do scanner:', config);
@@ -172,13 +177,33 @@ async function startQRScanner() {
         
         console.log('📸 Chamando scanner.start()...');
         
-        // Usar apenas facingMode (biblioteca aceita apenas 1 propriedade)
-        await state.qrScanner.start(
-            { facingMode: "environment" }, // Câmera traseira
-            config,
-            onScanSuccess,
-            onScanError
-        );
+        // Configurar câmera com resolução HD e flash
+        const cameraConstraints = {
+            facingMode: { exact: "environment" },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+            focusMode: { ideal: "continuous" },
+            torch: true // Tentar ativar flash
+        };
+        
+        try {
+            // Tentar com todas as configurações
+            await state.qrScanner.start(
+                cameraConstraints,
+                config,
+                onScanSuccess,
+                onScanError
+            );
+        } catch (e) {
+            console.log('⚠️ Tentando sem flash...', e.message);
+            // Fallback sem flash
+            await state.qrScanner.start(
+                { facingMode: "environment" },
+                config,
+                onScanSuccess,
+                onScanError
+            );
+        }
         
         console.log('✅ Scanner iniciado com sucesso!');
         
@@ -186,37 +211,106 @@ async function startQRScanner() {
         state.isProcessing = false; // Resetar flag de processamento
         elements.startScanBtn.style.display = 'none';
         elements.stopScanBtn.style.display = 'inline-flex';
+        elements.toggleFlashBtn.style.display = 'inline-flex';
         elements.scanResult.style.display = 'none';
         
-        // Tentar ativar flash automaticamente
-        setTimeout(async () => {
-            try {
-                const track = state.qrScanner.getRunningTrackCameraCapabilities();
-                if (track && track.torch) {
-                    await track.applyConstraints({
-                        advanced: [{ torch: true }]
-                    });
-                    console.log('💡 Flash ativado automaticamente');
-                    showAlert('💡 Flash ativado para melhor leitura', 'success');
-                }
-            } catch (e) {
-                console.log('💡 Flash não disponível:', e.message);
-                // Tentar método alternativo
-                try {
-                    const tracks = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-                    const videoTrack = tracks.getVideoTracks()[0];
-                    const capabilities = videoTrack.getCapabilities();
-                    if (capabilities.torch) {
-                        await videoTrack.applyConstraints({
-                            advanced: [{ torch: true }]
-                        });
-                        console.log('💡 Flash ativado (método alternativo)');
-                    }
-                } catch (e2) {
-                    console.log('💡 Flash não suportado neste dispositivo');
+        // Salvar video track para controlar flash
+        setTimeout(() => {
+            const videoElement = document.querySelector('#qr-reader video');
+            if (videoElement && videoElement.srcObject) {
+                const tracks = videoElement.srcObject.getVideoTracks();
+                if (tracks.length > 0) {
+                    state.videoTrack = tracks[0];
+                    console.log('📹 Video track salvo para controle de flash');
                 }
             }
-        }, 1000);
+        }, 500);
+        
+        // Tentar ativar flash com múltiplos métodos
+        setTimeout(async () => {
+            console.log('💡 Tentando ativar flash...');
+            let flashActivated = false;
+            
+            // Método 1: Via Html5Qrcode
+            try {
+                const settings = state.qrScanner.getRunningTrackSettings();
+                console.log('📹 Settings da câmera:', settings);
+                
+                const capabilities = state.qrScanner.getRunningTrackCameraCapabilities();
+                console.log('📹 Capabilities:', capabilities);
+                
+                if (capabilities && capabilities.torch) {
+                    await state.qrScanner.applyVideoConstraints({
+                        advanced: [{ torch: true }]
+                    });
+                    flashActivated = true;
+                    console.log('✅ Flash ativado (Método 1)');
+                }
+            } catch (e) {
+                console.log('⚠️ Método 1 falhou:', e.message);
+            }
+            
+            // Método 2: Acessar video track diretamente
+            if (!flashActivated) {
+                try {
+                    const videoElement = document.querySelector('#qr-reader video');
+                    if (videoElement && videoElement.srcObject) {
+                        const stream = videoElement.srcObject;
+                        const tracks = stream.getVideoTracks();
+                        if (tracks.length > 0) {
+                            const track = tracks[0];
+                            const capabilities = track.getCapabilities();
+                            console.log('📹 Track capabilities:', capabilities);
+                            
+                            if ('torch' in capabilities) {
+                                await track.applyConstraints({
+                                    advanced: [{ torch: true }]
+                                });
+                                flashActivated = true;
+                                console.log('✅ Flash ativado (Método 2)');
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.log('⚠️ Método 2 falhou:', e.message);
+                }
+            }
+            
+            // Método 3: ImageCapture API (Android)
+            if (!flashActivated) {
+                try {
+                    const videoElement = document.querySelector('#qr-reader video');
+                    if (videoElement && videoElement.srcObject) {
+                        const stream = videoElement.srcObject;
+                        const track = stream.getVideoTracks()[0];
+                        
+                        if (typeof ImageCapture !== 'undefined') {
+                            const imageCapture = new ImageCapture(track);
+                            const photoCapabilities = await imageCapture.getPhotoCapabilities();
+                            
+                            if (photoCapabilities.fillLightMode && photoCapabilities.fillLightMode.includes('flash')) {
+                                await track.applyConstraints({
+                                    advanced: [{ torch: true }]
+                                });
+                                flashActivated = true;
+                                console.log('✅ Flash ativado (Método 3)');
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.log('⚠️ Método 3 falhou:', e.message);
+                }
+            }
+            
+            if (flashActivated) {
+                showAlert('💡 Flash ativado!', 'success');
+                state.isFlashOn = true;
+                elements.toggleFlashBtn.classList.add('active');
+            } else {
+                console.log('❌ Flash não disponível neste dispositivo');
+                showAlert('🔦 Flash não disponível - use boa iluminação', 'info');
+            }
+        }, 1500);
         
         clearAlerts();
         showAlert('✅ Scanner ativo! Mantenha o QR Code dentro do quadrado', 'success');
@@ -263,8 +357,12 @@ async function stopQRScanner() {
             await state.qrScanner.stop();
             state.qrScanner.clear();
             state.isScannerActive = false;
+            state.isFlashOn = false;
+            state.videoTrack = null;
             elements.startScanBtn.style.display = 'inline-flex';
             elements.stopScanBtn.style.display = 'none';
+            elements.toggleFlashBtn.style.display = 'none';
+            elements.toggleFlashBtn.classList.remove('active');
             
             // Restaurar placeholder
             elements.qrReader.innerHTML = '<div class="qr-reader-placeholder"><div class="camera-icon">📷</div><p>Clique em "Iniciar Scanner" para começar</p></div>';
@@ -273,6 +371,45 @@ async function stopQRScanner() {
         }
     } catch (err) {
         console.error('Erro ao parar scanner:', err);
+    }
+}
+
+/**
+ * Toggle flash (ligar/desligar)
+ */
+async function toggleFlash() {
+    if (!state.videoTrack) {
+        showAlert('❌ Track de vídeo não disponível', 'error');
+        return;
+    }
+    
+    try {
+        const capabilities = state.videoTrack.getCapabilities();
+        
+        if (!capabilities.torch) {
+            showAlert('🔦 Flash não suportado neste dispositivo', 'error');
+            return;
+        }
+        
+        state.isFlashOn = !state.isFlashOn;
+        
+        await state.videoTrack.applyConstraints({
+            advanced: [{ torch: state.isFlashOn }]
+        });
+        
+        if (state.isFlashOn) {
+            elements.toggleFlashBtn.classList.add('active');
+            showAlert('💡 Flash ligado', 'success');
+        } else {
+            elements.toggleFlashBtn.classList.remove('active');
+            showAlert('💡 Flash desligado', 'info');
+        }
+        
+        console.log(`💡 Flash ${state.isFlashOn ? 'ligado' : 'desligado'}`);
+        
+    } catch (error) {
+        console.error('Erro ao alternar flash:', error);
+        showAlert('❌ Erro ao controlar flash', 'error');
     }
 }
 
