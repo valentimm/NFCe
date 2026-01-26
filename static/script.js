@@ -136,11 +136,27 @@ async function startQRScanner() {
         // Limpar placeholder
         elements.qrReader.innerHTML = '';
         
-        // Configurar scanner
+        // Configurar scanner com melhor desempenho
         const config = {
-            fps: 10,
-            qrbox: { width: 250, height: 250 },
-            aspectRatio: 1.0
+            fps: 30, // Aumentado para detecção mais rápida
+            qrbox: function(viewfinderWidth, viewfinderHeight) {
+                // Área de scan maior e responsiva
+                let minEdge = Math.min(viewfinderWidth, viewfinderHeight);
+                let qrboxSize = Math.floor(minEdge * 0.7);
+                return {
+                    width: qrboxSize,
+                    height: qrboxSize
+                };
+            },
+            aspectRatio: 1.777778, // 16:9 para melhor qualidade
+            disableFlip: false, // Permite espelhamento
+            experimentalFeatures: {
+                useBarCodeDetectorIfSupported: true // API nativa mais rápida
+            },
+            // Formatos suportados
+            formatsToSupport: [
+                Html5QrcodeSupportedFormats.QR_CODE
+            ]
         };
         
         console.log('📋 Configuração do scanner:', config);
@@ -151,8 +167,17 @@ async function startQRScanner() {
         showAlert('📷 Solicitando acesso à câmera...', 'success');
         
         console.log('📸 Chamando scanner.start()...');
+        
+        // Configurações de câmera melhoradas
+        const cameraConfig = { 
+            facingMode: "environment", // Câmera traseira
+            advanced: [{
+                zoom: 1.5 // Zoom para focar melhor no QR code
+            }]
+        };
+        
         await state.qrScanner.start(
-            { facingMode: "environment" }, // Câmera traseira em mobile
+            cameraConfig,
             config,
             onScanSuccess,
             onScanError
@@ -165,8 +190,25 @@ async function startQRScanner() {
         elements.stopScanBtn.style.display = 'inline-flex';
         elements.scanResult.style.display = 'none';
         
+        // Tentar ativar lanterna se disponível (Android)
+        try {
+            const stream = state.qrScanner.getRunningTrackCameraCapabilities();
+            if (stream && stream.torch) {
+                console.log('💡 Lanterna disponível');
+            }
+        } catch (e) {
+            console.log('💡 Lanterna não disponível');
+        }
+        
         clearAlerts();
-        showAlert('✅ Scanner ativo! Aponte para o QR Code da NFCe', 'success');
+        showAlert('✅ Scanner ativo! Mantenha o QR Code dentro do quadrado', 'success');
+        
+        // Adicionar dica após 3 segundos
+        setTimeout(() => {
+            if (state.isScannerActive) {
+                showAlert('💡 Dica: Aproxime ou afaste o celular até o QR ficar nítido', 'info');
+            }
+        }, 3000);
         
     } catch (err) {
         console.error('❌ Erro ao iniciar scanner:', err);
@@ -220,18 +262,35 @@ async function stopQRScanner() {
  * Callback de sucesso do scanner
  */
 function onScanSuccess(decodedText, decodedResult) {
-    console.log('QR Code detectado:', decodedText);
+    console.log('✅ QR Code detectado:', decodedText);
     
-    // Parar scanner
+    // Parar scanner imediatamente
     stopQRScanner();
     
-    // Mostrar resultado
+    // Feedback visual
     elements.scanResult.style.display = 'block';
+    elements.scanResult.style.animation = 'pulse 0.5s ease';
     elements.scannedUrl.textContent = decodedText;
     
-    // Vibração de feedback (mobile)
+    // Feedback tátil (vibração)
     if ('vibrate' in navigator) {
-        navigator.vibrate([100, 50, 100]);
+        navigator.vibrate([200, 100, 200]); // Vibração mais forte
+    }
+    
+    // Feedback sonoro
+    try {
+        const beep = new AudioContext();
+        const oscillator = beep.createOscillator();
+        const gainNode = beep.createGain();
+        oscillator.connect(gainNode);
+        gainNode.connect(beep.destination);
+        oscillator.frequency.value = 800;
+        oscillator.type = 'sine';
+        gainNode.gain.setValueAtTime(0.3, beep.currentTime);
+        oscillator.start(beep.currentTime);
+        oscillator.stop(beep.currentTime + 0.1);
+    } catch (e) {
+        console.log('🔇 Som não disponível');
     }
     
     // Processar automaticamente
