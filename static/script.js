@@ -136,24 +136,28 @@ async function startQRScanner() {
         // Limpar placeholder
         elements.qrReader.innerHTML = '';
         
-        // Configurar scanner com melhor desempenho
+        // Configurar scanner otimizado para QR codes pequenos
         const config = {
-            fps: 30, // Aumentado para detecção mais rápida
+            fps: 30,
             qrbox: function(viewfinderWidth, viewfinderHeight) {
-                // Área de scan maior e responsiva
+                // Área menor para melhor foco em QR codes pequenos
                 let minEdge = Math.min(viewfinderWidth, viewfinderHeight);
-                let qrboxSize = Math.floor(minEdge * 0.7);
+                let qrboxSize = Math.floor(minEdge * 0.5); // Reduzido para 50%
                 return {
                     width: qrboxSize,
                     height: qrboxSize
                 };
             },
-            aspectRatio: 1.777778, // 16:9 para melhor qualidade
-            disableFlip: false, // Permite espelhamento
-            experimentalFeatures: {
-                useBarCodeDetectorIfSupported: true // API nativa mais rápida
+            aspectRatio: 1.0,
+            disableFlip: false,
+            videoConstraints: {
+                facingMode: "environment",
+                focusMode: "continuous", // Foco contínuo
+                advanced: [{ focusMode: "continuous" }]
             },
-            // Formatos suportados
+            experimentalFeatures: {
+                useBarCodeDetectorIfSupported: true
+            },
             formatsToSupport: [
                 Html5QrcodeSupportedFormats.QR_CODE
             ]
@@ -179,19 +183,40 @@ async function startQRScanner() {
         console.log('✅ Scanner iniciado com sucesso!');
         
         state.isScannerActive = true;
+        state.isProcessing = false; // Resetar flag de processamento
         elements.startScanBtn.style.display = 'none';
         elements.stopScanBtn.style.display = 'inline-flex';
         elements.scanResult.style.display = 'none';
         
-        // Tentar ativar lanterna se disponível (Android)
-        try {
-            const stream = state.qrScanner.getRunningTrackCameraCapabilities();
-            if (stream && stream.torch) {
-                console.log('💡 Lanterna disponível');
+        // Tentar ativar flash automaticamente
+        setTimeout(async () => {
+            try {
+                const track = state.qrScanner.getRunningTrackCameraCapabilities();
+                if (track && track.torch) {
+                    await track.applyConstraints({
+                        advanced: [{ torch: true }]
+                    });
+                    console.log('💡 Flash ativado automaticamente');
+                    showAlert('💡 Flash ativado para melhor leitura', 'success');
+                }
+            } catch (e) {
+                console.log('💡 Flash não disponível:', e.message);
+                // Tentar método alternativo
+                try {
+                    const tracks = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+                    const videoTrack = tracks.getVideoTracks()[0];
+                    const capabilities = videoTrack.getCapabilities();
+                    if (capabilities.torch) {
+                        await videoTrack.applyConstraints({
+                            advanced: [{ torch: true }]
+                        });
+                        console.log('💡 Flash ativado (método alternativo)');
+                    }
+                } catch (e2) {
+                    console.log('💡 Flash não suportado neste dispositivo');
+                }
             }
-        } catch (e) {
-            console.log('💡 Lanterna não disponível');
-        }
+        }, 1000);
         
         clearAlerts();
         showAlert('✅ Scanner ativo! Mantenha o QR Code dentro do quadrado', 'success');
@@ -255,19 +280,23 @@ async function stopQRScanner() {
  * Callback de sucesso do scanner
  */
 function onScanSuccess(decodedText, decodedResult) {
+    // Evitar processar o mesmo código múltiplas vezes
+    if (state.isProcessing) {
+        console.log('⏳ Já processando um código, aguarde...');
+        return;
+    }
+    
     console.log('✅ QR Code detectado:', decodedText);
+    state.isProcessing = true;
     
-    // Parar scanner imediatamente
-    stopQRScanner();
-    
-    // Feedback visual
+    // Feedback visual - NÃO para o scanner
     elements.scanResult.style.display = 'block';
     elements.scanResult.style.animation = 'pulse 0.5s ease';
-    elements.scannedUrl.textContent = decodedText;
+    elements.scannedUrl.textContent = decodedText.substring(0, 50) + '...';
     
     // Feedback tátil (vibração)
     if ('vibrate' in navigator) {
-        navigator.vibrate([200, 100, 200]); // Vibração mais forte
+        navigator.vibrate([200, 100, 200]);
     }
     
     // Feedback sonoro
@@ -286,7 +315,7 @@ function onScanSuccess(decodedText, decodedResult) {
         console.log('🔇 Som não disponível');
     }
     
-    // Processar automaticamente
+    // Processar NFCe (scanner continua rodando)
     processNFCe(decodedText);
 }
 
@@ -313,6 +342,57 @@ function onScanError(error) {
             closeModal();
         }
     });
+
+/**
+ * Processar NFCe usando Scrapy Spider
+ */
+async function processNFCe(url) {
+    clearAlerts();
+    showAlert('⏳ Processando NFCe com Scrapy... Aguarde.', 'info');
+    
+    console.log('🕷️ Iniciando scraping para:', url);
+    
+    try {
+        const response = await fetch('/api/process', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ url })
+        });
+        
+        const data = await response.json();
+        
+        if (!response.ok) {
+            throw new Error(data.error || 'Erro ao processar NFCe');
+        }
+        
+        console.log('✅ Spider executada com sucesso');
+        showAlert('✅ NFCe processada! Aguarde 3s para escanear próxima...', 'success');
+        
+        // Atualizar estatísticas
+        await loadStats();
+        
+        // Ocultar resultado após 3 segundos e permitir nova leitura
+        setTimeout(() => {
+            elements.scanResult.style.display = 'none';
+            state.isProcessing = false;
+            if (state.isScannerActive) {
+                showAlert('📷 Pronto para escanear próximo QR Code', 'success');
+            }
+        }, 3000);
+        
+    } catch (error) {
+        console.error('❌ Erro ao processar:', error);
+        showAlert(`❌ ${error.message}`, 'error');
+        
+        // Permitir nova tentativa após erro
+        setTimeout(() => {
+            state.isProcessing = false;
+            elements.scanResult.style.display = 'none';
+        }, 2000);
+    }
+}
 
 /**
  * Carregar estatísticas
