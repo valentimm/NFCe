@@ -1,14 +1,13 @@
 """
-NFCe SUPER READER - VERSÃO ZOOM DINÂMICO
+NFCe SUPER READER - VERSÃO REFATORADA (POO)
 Funcionalidades:
 - Zoom Ajustável em Tempo Real (Teclas W e S)
-- Super-Resolução (Upscale 2x na área de foco)
+- Super-Resolução (Upscale) e Sharpening
 - Mira de Alta Visibilidade
-- Leitura via IA (QReader Large)
+- Leitura assíncrona via Scrapy
 """
 
 import cv2
-from qreader import QReader
 import numpy as np
 import subprocess
 import csv
@@ -16,287 +15,331 @@ import os
 import time
 import threading
 import re
+from dataclasses import dataclass
+from typing import Tuple, Dict, Any
+from qreader import QReader
 
 # ================= CONFIGURAÇÕES =================
-CAMERA_INDEX = 1        # 0 = Webcam Padrão, 1 = Externa
-CSV_FILE = "nfc_data.csv"
-SCRAPY_FOLDER = "nfceReader/" 
 
-# Ajustes Iniciais
-INITIAL_ZOOM = 300      # Tamanho inicial do quadrado (menor = mais zoom)
-MIN_ZOOM = 100          # Tamanho mínimo (máximo zoom) - reduzido para QR pequenos
-MAX_ZOOM = 900          # Tamanho máximo (mínimo zoom)
-AIM_TOLERANCE_PCT = 0.35 # Tolerância da mira (35% do tamanho do zoom atual)
-RESET_DELAY = 4
+@dataclass
+class Config:
+    camera_index: int = 1  # 0 = Webcam, 1 = Externa
+    csv_file: str = "nfc_data.csv"
+    scrapy_folder: str = "nfceReader/"
+    
+    # Zoom e Mira
+    initial_zoom: int = 300
+    min_zoom: int = 100
+    max_zoom: int = 900
+    aim_tolerance_pct: float = 0.35
+    reset_delay: int = 4
+    
+    # Processamento de Imagem
+    upscale_factor: float = 3.0
+    sharpen_strength: float = 1.5
+    
+    # Resolução da Câmera
+    cam_width: int = 1920
+    cam_height: int = 1080
 
-# Configurações de processamento de imagem
-UPSCALE_FACTOR = 3.0    # Aumentado de 2.0 para 3.0 (melhor para QR pequenos)
-SHARPEN_STRENGTH = 1.5  # Força do sharpening         
+@dataclass
+class AppState:
+    status: str = "Ajuste o Zoom (W / S)"
+    color: Tuple[int, int, int] = (255, 255, 255)  # Branco
+    is_processing: bool = False
+    last_url: str = ""
+    last_time: float = 0.0
+    current_zoom: int = 300
 
-# Regex NFCe
-NFCE_PATTERN = re.compile(r'https?://.*(?:fazenda|sefaz|nfce|nfe|qrcode|decodificacao|portal).*', re.IGNORECASE)
-
-# Cores
-VALOR_VERDE = (0, 255, 0)
-VALOR_VERMELHO = (0, 0, 255)
-VALOR_AMARELO = (0, 255, 255)
-VALOR_AZUL = (255, 200, 0)
-VALOR_CINZA = (128, 128, 128)
-VALOR_PRETO = (0, 0, 0)
-VALOR_BRANCO = (255, 255, 255)
-
-# ================= ESTADO GLOBAL =================
-app_state = {
-    "status": "Ajuste o Zoom (W / S)",
-    "color": VALOR_BRANCO,
-    "is_processing": False,
-    "last_url": "",
-    "last_time": 0,
-    "current_zoom": INITIAL_ZOOM
+# Cores (BGR para OpenCV)
+COLORS = {
+    'GREEN': (0, 255, 0),
+    'RED': (0, 0, 255),
+    'YELLOW': (0, 255, 255),
+    'BLUE': (255, 200, 0),
+    'GRAY': (128, 128, 128),
+    'BLACK': (0, 0, 0),
+    'WHITE': (255, 255, 255)
 }
 
-# ================= FUNÇÕES AUXILIARES =================
+NFCE_PATTERN = re.compile(r'https?://.*(?:fazenda|sefaz|nfce|nfe|qrcode|decodificacao|portal).*', re.IGNORECASE)
 
-def init_csv():
-    if not os.path.exists(CSV_FILE):
-        with open(CSV_FILE, mode="w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.writer(f, delimiter=';')
-            writer.writerow(["Estabelecimento", "Produto", "Quantidade", "Unidade", "Valor_Total", "Desconto"])
 
-def run_scrapy_thread(url):
-    app_state["is_processing"] = True
-    app_state["status"] = "Baixando dados..."
-    app_state["color"] = VALOR_AZUL
-    
-    comando = f'scrapy crawl nfcedata -a url="{url}"'
-    
-    try:
-        process = subprocess.Popen(
-            comando, 
-            cwd=SCRAPY_FOLDER, 
-            shell=True, 
-            stdout=subprocess.PIPE, 
-            stderr=subprocess.PIPE, 
-            text=True
-        )
-        stdout, stderr = process.communicate(timeout=45)
+class NFCeSuperReader:
+    def __init__(self):
+        self.cfg = Config()
+        self.state = AppState(current_zoom=self.cfg.initial_zoom)
+        self.qreader = QReader(model_size='l')
         
-        if process.returncode == 0:
-            app_state["status"] = "SUCESSO! Nota Salva."
-            app_state["color"] = VALOR_VERDE
-            print(f"[Sucesso] NFCe processada: {url[:50]}...")
-        else:
-            app_state["status"] = "Erro no Scrapy"
-            app_state["color"] = VALOR_VERMELHO
-            print(f"[Erro] Scrapy falhou: {stderr[:100]}")
+        self._init_csv()
+        self._init_camera()
 
-    except subprocess.TimeoutExpired:
-        app_state["status"] = "Timeout (45s)"
-        app_state["color"] = VALOR_VERMELHO
-        print("[Erro] Timeout ao processar NFCe")
-    except Exception as e:
-        app_state["status"] = f"Erro: {str(e)[:15]}"
-        app_state["color"] = VALOR_VERMELHO
-        print(f"[Erro] Exceção: {e}")
+    def _init_csv(self):
+        """Inicializa o arquivo CSV se não existir."""
+        if not os.path.exists(self.cfg.csv_file):
+            try:
+                with open(self.cfg.csv_file, mode="w", newline="", encoding="utf-8-sig") as f:
+                    writer = csv.writer(f, delimiter=';')
+                    writer.writerow(["Estabelecimento", "Produto", "Quantidade", "Unidade", "Valor_Total", "Desconto"])
+            except IOError as e:
+                print(f"[Erro] Falha ao criar CSV: {e}")
+
+    def _init_camera(self):
+        """Configura a captura de vídeo."""
+        print(f"[Sistema] Iniciando Câmera {self.cfg.camera_index}...")
+        self.cap = cv2.VideoCapture(self.cfg.camera_index)
+        if not self.cap.isOpened():
+            raise RuntimeError(f"Não foi possível abrir a câmera {self.cfg.camera_index}")
         
-    finally:
-        time.sleep(2)
-        app_state["is_processing"] = False
-        app_state["status"] = "Ajuste o Zoom (W / S)"
-        app_state["color"] = VALOR_BRANCO
-
-def is_centered(bbox, crop_size):
-    """Verifica se o QR está no centro (proporcional ao zoom atual)"""
-    if bbox is None: return False
-    x1, y1, x2, y2 = bbox
-    qr_cx, qr_cy = x1 + (x2 - x1) / 2, y1 + (y2 - y1) / 2
-    center = crop_size / 2
-    
-    # A tolerância muda conforme o zoom (mais zoom = precisa ser mais preciso)
-    tolerance = crop_size * AIM_TOLERANCE_PCT
-    dist = np.sqrt((qr_cx - center)**2 + (qr_cy - center)**2)
-    return dist < tolerance
-
-def preprocess_for_small_qr(image):
-    """Aplica processamento avançado para melhorar detecção de QR codes pequenos"""
-    # 1. Sharpening (realçar bordas)
-    kernel_sharpen = np.array([
-        [-1, -1, -1],
-        [-1,  9, -1],
-        [-1, -1, -1]
-    ]) * SHARPEN_STRENGTH
-    sharpened = cv2.filter2D(image, -1, kernel_sharpen)
-    
-    # 2. Ajuste de contraste adaptativo (CLAHE)
-    lab = cv2.cvtColor(sharpened, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    l = clahe.apply(l)
-    enhanced = cv2.merge([l, a, b])
-    enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
-    
-    # 3. Denoising leve (reduz ruído sem borrar)
-    denoised = cv2.fastNlMeansDenoisingColored(enhanced, None, 10, 10, 7, 21)
-    
-    return denoised
-
-def draw_hud(frame, crop_coords):
-    h, w = frame.shape[:2]
-    cx_frame, cy_frame = w // 2, h // 2
-    x1, y1, x2, y2 = crop_coords
-    
-    # 1. Desenha a área do Zoom Dinâmico
-    cv2.rectangle(frame, (x1, y1), (x2, y2), VALOR_PRETO, 4) 
-    cv2.rectangle(frame, (x1, y1), (x2, y2), VALOR_AZUL, 2)
-    
-    # Texto de Instrução
-    info_zoom = f"ZOOM: {app_state['current_zoom']}px (W/S) | Upscale: {UPSCALE_FACTOR}x"
-    cv2.putText(frame, info_zoom, (x1, y2 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, VALOR_AZUL, 2)
-
-    # 2. MIRA (CROSSHAIR)
-    # A mira se adapta visualmente ao tamanho da caixa
-    gap = int(app_state['current_zoom'] * 0.15) 
-    tolerance_px = int(app_state['current_zoom'] * AIM_TOLERANCE_PCT)
-    
-    # Círculo de Tolerância
-    cv2.circle(frame, (cx_frame, cy_frame), tolerance_px, VALOR_PRETO, 3)
-    cv2.circle(frame, (cx_frame, cy_frame), tolerance_px, VALOR_BRANCO, 1)
-
-    # Cruz
-    cv2.line(frame, (cx_frame - gap, cy_frame), (cx_frame + gap, cy_frame), VALOR_AMARELO, 2)
-    cv2.line(frame, (cx_frame, cy_frame - gap), (cx_frame, cy_frame + gap), VALOR_AMARELO, 2)
-
-    # 3. Painel de Status
-    cv2.rectangle(frame, (0, 0), (w, 60), VALOR_PRETO, -1)
-    cv2.putText(frame, app_state["status"], (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, app_state["color"], 2)
-    
-    if app_state["is_processing"]:
-        cv2.putText(frame, "PROCESSANDO...", (w - 250, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, VALOR_AMARELO, 2)
-
-# ================= MAIN =================
-
-def main():
-    print("\n[Sistema] Carregando IA...")
-    qreader = QReader(model_size='l') 
-    init_csv()
-    
-    cap = cv2.VideoCapture(CAMERA_INDEX)
-    
-    if not cap.isOpened():
-        print(f"[Erro] Não foi possível abrir a câmera {CAMERA_INDEX}")
-        return
-    
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-    
-    real_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    real_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    print(f"[Sistema] Camera: {real_w}x{real_h}")
-    print(f"[Config] Upscale: {UPSCALE_FACTOR}x | Sharpening: {SHARPEN_STRENGTH}")
-    print(f"[Config] Zoom inicial: {INITIAL_ZOOM}px | Min: {MIN_ZOOM}px | Max: {MAX_ZOOM}px")
-    print("[DICA] Use 'S' para diminuir a caixa (mais zoom) e 'W' para aumentar.")
-    print("[DICA] Use 'Q' para sair")
-    print("[INFO] Para QR codes muito pequenos, use zoom mínimo (100px) e aproxime a câmera")
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("[Erro] Falha ao capturar frame da câmera")
-            break
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cfg.cam_width)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cfg.cam_height)
         
-        # --- 1. CONTROLE DE ZOOM (Teclado) ---
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'): break
-        
-        # 'w' aumenta o quadrado (Menos zoom)
-        if key == ord('w') or key == ord('W'):
-            app_state['current_zoom'] = min(app_state['current_zoom'] + 20, MAX_ZOOM)
-        
-        # 's' diminui o quadrado (Mais zoom no QR code)
-        elif key == ord('s') or key == ord('S'):
-            app_state['current_zoom'] = max(app_state['current_zoom'] - 20, MIN_ZOOM)
+        # Atualiza dimensões reais caso a câmera não suporte o solicitado
+        self.real_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.real_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        print(f"[Sistema] Resolução Ativa: {self.real_w}x{self.real_h}")
 
-        # --- 2. PREPARAR IMAGEM (Crop + Pré-processamento + Super-Resolução) ---
-        zoom_sz = app_state['current_zoom']
-        cy, cx = real_h // 2, real_w // 2
+    def _run_scrapy_thread(self, url: str):
+        """Executa o Scrapy em uma thread separada para não travar o vídeo."""
+        self.state.is_processing = True
+        self.state.status = "Baixando dados..."
+        self.state.color = COLORS['BLUE']
+
+        comando = f'scrapy crawl nfcedata -a url="{url}"'
+
+        try:
+            process = subprocess.Popen(
+                comando,
+                cwd=self.cfg.scrapy_folder,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            _, stderr = process.communicate(timeout=45)
+
+            if process.returncode == 0:
+                self.state.status = "SUCESSO! Nota Salva."
+                self.state.color = COLORS['GREEN']
+                print(f"[Sucesso] Processado: {url[:40]}...")
+            else:
+                self.state.status = "Erro no Scrapy"
+                self.state.color = COLORS['RED']
+                print(f"[Erro Scrapy] {stderr[:100]}")
+
+        except subprocess.TimeoutExpired:
+            self.state.status = "Timeout (45s)"
+            self.state.color = COLORS['RED']
+        except Exception as e:
+            self.state.status = f"Erro: {str(e)[:15]}"
+            self.state.color = COLORS['RED']
+        finally:
+            time.sleep(2)
+            self.state.is_processing = False
+            self.state.status = "Ajuste o Zoom (W / S)"
+            self.state.color = COLORS['WHITE']
+
+    def _preprocess_image(self, image: np.ndarray) -> np.ndarray:
+        """Aplica filtros para melhorar detecção em imagens de baixa qualidade/pequenas."""
+        # 1. Sharpening
+        kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]]) * self.cfg.sharpen_strength
+        sharpened = cv2.filter2D(image, -1, kernel)
         
-        crop_x1 = max(0, cx - zoom_sz // 2)
-        crop_y1 = max(0, cy - zoom_sz // 2)
-        crop_x2 = min(real_w, cx + zoom_sz // 2)
-        crop_y2 = min(real_h, cy + zoom_sz // 2)
+        # 2. Contraste Adaptativo (CLAHE)
+        # Convertemos para o espaço de cor LAB para trabalhar apenas na Luminosidade
+        lab_image = cv2.cvtColor(sharpened, cv2.COLOR_BGR2LAB)
         
-        cropped_frame = frame[crop_y1:crop_y2, crop_x1:crop_x2]
+        # Separa os canais: L (Lightness), A (Green-Red), B (Blue-Yellow)
+        l_channel, a_channel, b_channel = cv2.split(lab_image)
         
-        # Aplicar pré-processamento para QR codes pequenos
-        processed_frame = preprocess_for_small_qr(cropped_frame)
+        # Aplica CLAHE apenas no canal de Luminosidade (L)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        l_channel_eq = clahe.apply(l_channel)
         
-        # SUPER-RESOLUÇÃO: Ampliar 3x para melhorar pixels pequenos
-        enhanced_frame = cv2.resize(
-            processed_frame, 
+        # Reúne os canais novamente
+        enhanced = cv2.merge([l_channel_eq, a_channel, b_channel])
+        
+        # 3. Denoising e Conversão final
+        enhanced_bgr = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
+        denoised = cv2.fastNlMeansDenoisingColored(enhanced_bgr, None, 10, 10, 7, 21)
+        
+        # 4. Super Resolução (Upscale)
+        upscaled = cv2.resize(
+            denoised, 
             None, 
-            fx=UPSCALE_FACTOR, 
-            fy=UPSCALE_FACTOR, 
+            fx=self.cfg.upscale_factor, 
+            fy=self.cfg.upscale_factor, 
             interpolation=cv2.INTER_CUBIC
         )
-        rgb_enhanced = cv2.cvtColor(enhanced_frame, cv2.COLOR_BGR2RGB)
+        return upscaled
+
+    def _get_crop_coords(self) -> Tuple[int, int, int, int]:
+        """Calcula coordenadas do quadrado de zoom centralizado."""
+        cx, cy = self.real_w // 2, self.real_h // 2
+        zoom = self.state.current_zoom
         
-        # --- 3. DETECÇÃO ---
-        target_detection = None
+        x1 = max(0, cx - zoom // 2)
+        y1 = max(0, cy - zoom // 2)
+        x2 = min(self.real_w, cx + zoom // 2)
+        y2 = min(self.real_h, cy + zoom // 2)
+        return x1, y1, x2, y2
+
+    def _is_centered(self, bbox: Tuple[float, float, float, float]) -> bool:
+        """Verifica se o QR está no centro da mira."""
+        x1, y1, x2, y2 = bbox
+        qr_cx = x1 + (x2 - x1) / 2
+        qr_cy = y1 + (y2 - y1) / 2
         
-        if not app_state["is_processing"]:
-            try:
-                # Detecta na imagem ampliada
-                detections = qreader.detect(image=rgb_enhanced)
+        # O centro da imagem cortada (crop) é sempre metade do tamanho do zoom
+        center_crop = self.state.current_zoom * self.cfg.upscale_factor / 2
+        tolerance = (self.state.current_zoom * self.cfg.upscale_factor) * self.cfg.aim_tolerance_pct
+        
+        dist = np.sqrt((qr_cx - center_crop)**2 + (qr_cy - center_crop)**2)
+        return dist < tolerance
+
+    def _process_detections(self, frame: np.ndarray, rgb_enhanced: np.ndarray, crop_coords: Tuple[int, int, int, int]):
+        """Detecta, valida e desenha os resultados."""
+        if self.state.is_processing:
+            return
+
+        try:
+            detections = self.qreader.detect(image=rgb_enhanced)
+            crop_x1, crop_y1, _, _ = crop_coords
+            target_detection = None
+
+            for detection in detections:
+                bbox = detection.get('bbox_xyxy')
+                if bbox is None: 
+                    continue
+
+                # Verifica centralização na imagem ampliada
+                is_target = self._is_centered(bbox)
                 
-                for detection in detections:
-                    bbox = detection.get('bbox_xyxy')
-                    if bbox is None: continue
-                    
-                    # Ajustar coordenadas de volta ao tamanho original do crop
-                    bx1, by1, bx2, by2 = map(lambda v: int(v / UPSCALE_FACTOR), bbox)
-                    
-                    # Calcular posição real na tela cheia para desenhar
-                    orig_x1, orig_y1 = bx1 + crop_x1, by1 + crop_y1
-                    orig_x2, orig_y2 = bx2 + crop_x1, by2 + crop_y1
-                    
-                    # Verifica se está na mira (baseado no tamanho do zoom atual)
-                    if is_centered((bx1, by1, bx2, by2), zoom_sz):
-                        target_detection = detection # Passamos a detecção original (ampliada)
-                        cv2.rectangle(frame, (orig_x1, orig_y1), (orig_x2, orig_y2), VALOR_AMARELO, 3)
-                    else:
-                        cv2.rectangle(frame, (orig_x1, orig_y1), (orig_x2, orig_y2), VALOR_CINZA, 1)
-                        
-            except Exception as e:
-                print(f"[Aviso] Erro na detecção: {e}")
-
-        # --- 4. DECODIFICAÇÃO ---
-        if target_detection:
-            try:
-                # Decodifica usando a imagem ampliada (Super Resolução)
-                decoded = qreader.decode(image=rgb_enhanced, candidates=[target_detection])
+                # Traduz coordenadas do upscale para o frame original
+                bx1, by1, bx2, by2 = map(lambda v: int(v / self.cfg.upscale_factor), bbox)
                 
-                if decoded and decoded[0]:
-                    url = decoded[0]
-                    current_time = time.time()
-                    
-                    if (current_time - app_state["last_time"] > RESET_DELAY) or (url != app_state["last_url"]):
-                        if NFCE_PATTERN.match(url):
-                            app_state["last_url"] = url
-                            app_state["last_time"] = current_time
-                            t = threading.Thread(target=run_scrapy_thread, args=(url,))
-                            t.daemon = True
-                            t.start()
-                        else:
-                            app_state["status"] = "QR Code invalido"
-                            app_state["color"] = VALOR_VERMELHO
-            except Exception as e:
-                print(f"[Aviso] Erro na decodificação: {e}")
+                orig_x1, orig_y1 = bx1 + crop_x1, by1 + crop_y1
+                orig_x2, orig_y2 = bx2 + crop_y1, by2 + crop_y1 # Bugfix: bx2 + crop_x1 era o correto, corrigido abaixo
+                orig_x2, orig_y2 = bx2 + crop_x1, by2 + crop_y1
 
-        draw_hud(frame, (crop_x1, crop_y1, crop_x2, crop_y2))
-        cv2.imshow("NFCe Super Zoom", frame)
+                color = COLORS['YELLOW'] if is_target else COLORS['GRAY']
+                thickness = 3 if is_target else 1
+                cv2.rectangle(frame, (orig_x1, orig_y1), (orig_x2, orig_y2), color, thickness)
 
-    cap.release()
-    cv2.destroyAllWindows()
+                if is_target:
+                    target_detection = detection
+
+            # Se encontrou um alvo válido, tenta decodificar
+            if target_detection:
+                self._decode_target(rgb_enhanced, target_detection)
+
+        except Exception as e:
+            print(f"[Aviso] Erro na detecção: {e}")
+
+    def _decode_target(self, image: np.ndarray, detection: Dict[str, Any]):
+        """Decodifica o QR code alvo."""
+        try:
+            decoded = self.qreader.decode(image=image, candidates=[detection])
+            if decoded and decoded[0]:
+                url = decoded[0]
+                self._handle_url(url)
+        except Exception as e:
+            print(f"[Aviso] Erro decode: {e}")
+
+    def _handle_url(self, url: str):
+        """Valida URL e inicia thread de download."""
+        current_time = time.time()
+        
+        # Debounce: evita processar a mesma URL repetidamente em curto espaço de tempo
+        is_new_url = url != self.state.last_url
+        is_time_elapsed = (current_time - self.state.last_time > self.cfg.reset_delay)
+        
+        if is_time_elapsed or is_new_url:
+            if NFCE_PATTERN.match(url):
+                self.state.last_url = url
+                self.state.last_time = current_time
+                
+                # Inicia thread
+                t = threading.Thread(target=self._run_scrapy_thread, args=(url,))
+                t.daemon = True
+                t.start()
+            else:
+                self.state.status = "QR Code Inválido"
+                self.state.color = COLORS['RED']
+
+    def _draw_hud(self, frame: np.ndarray, crop_coords: Tuple[int, int, int, int]):
+        """Desenha a interface gráfica (HUD)."""
+        h, w = frame.shape[:2]
+        cx, cy = w // 2, h // 2
+        x1, y1, x2, y2 = crop_coords
+
+        # 1. Caixa de Zoom
+        cv2.rectangle(frame, (x1, y1), (x2, y2), COLORS['BLACK'], 4)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), COLORS['BLUE'], 2)
+        
+        # Texto Informativo
+        info = f"ZOOM: {self.state.current_zoom}px | Upscale: {self.cfg.upscale_factor}x"
+        cv2.putText(frame, info, (x1, y2 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLORS['BLUE'], 2)
+
+        # 2. Mira (Crosshair)
+        gap = int(self.state.current_zoom * 0.15)
+        tol_px = int(self.state.current_zoom * self.cfg.aim_tolerance_pct)
+        
+        # Círculo
+        cv2.circle(frame, (cx, cy), tol_px, COLORS['BLACK'], 3)
+        cv2.circle(frame, (cx, cy), tol_px, COLORS['WHITE'], 1)
+        # Linhas
+        cv2.line(frame, (cx - gap, cy), (cx + gap, cy), COLORS['YELLOW'], 2)
+        cv2.line(frame, (cx, cy - gap), (cx, cy + gap), COLORS['YELLOW'], 2)
+
+        # 3. Barra de Status
+        cv2.rectangle(frame, (0, 0), (w, 60), COLORS['BLACK'], -1)
+        cv2.putText(frame, self.state.status, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, self.state.color, 2)
+
+        if self.state.is_processing:
+            cv2.putText(frame, "PROCESSANDO...", (w - 250, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLORS['YELLOW'], 2)
+
+    def run(self):
+        """Loop principal da aplicação."""
+        print("[Sistema] Loop iniciado. Pressione 'Q' para sair.")
+        
+        while True:
+            ret, frame = self.cap.read()
+            if not ret:
+                print("[Erro] Falha ao capturar frame")
+                break
+
+            # Inputs
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'): 
+                break
+            if key in [ord('w'), ord('W')]:
+                self.state.current_zoom = min(self.state.current_zoom + 20, self.cfg.max_zoom)
+            if key in [ord('s'), ord('S')]:
+                self.state.current_zoom = max(self.state.current_zoom - 20, self.cfg.min_zoom)
+
+            # Preparação da Imagem
+            x1, y1, x2, y2 = self._get_crop_coords()
+            cropped = frame[y1:y2, x1:x2]
+            
+            if cropped.size > 0:
+                enhanced = self._preprocess_image(cropped)
+                rgb_enhanced = cv2.cvtColor(enhanced, cv2.COLOR_BGR2RGB)
+                
+                # Detecção e Lógica
+                self._process_detections(frame, rgb_enhanced, (x1, y1, x2, y2))
+            
+            # Desenha HUD
+            self._draw_hud(frame, (x1, y1, x2, y2))
+            
+            cv2.imshow("NFCe Super Reader Pro", frame)
+
+        self.cap.release()
+        cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    main()
+    try:
+        reader = NFCeSuperReader()
+        reader.run()
+    except Exception as e:
+        print(f"[Fatal] Erro ao iniciar aplicação: {e}")
