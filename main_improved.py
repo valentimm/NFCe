@@ -30,10 +30,12 @@ class Config:
     reset_delay: int = 4
     
     # Processamento de Imagem Avançado
-    sharpen_strength: float = 1.5
+    sharpen_strength: float = 2.0  # Mais agressivo
     use_adaptive_processing: bool = True
     use_multiscale_detection: bool = True
-    scales: Tuple[float, ...] = (1.0, 1.5, 0.75)  # Escalas para detecção
+    scales: Tuple[float, ...] = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0)  # Escalas para QR pequenos
+    use_upscaling: bool = True  # Upscale para cédulas pequenas
+    upscale_factor: float = 2.0  # 2x upscaling para cores pequenas
     
     # Resolução da Câmera
     cam_width: int = 1920
@@ -139,32 +141,53 @@ class NFCeReader:
             self.state.color = COLORS['GREEN']
 
     def _enhance_frame(self, image: np.ndarray) -> np.ndarray:
-        """Aplica processamento avançado para melhorar detecção de QR codes."""
-        # 1. Reduzir ruído mantendo bordas
-        denoised = cv2.fastNlMeansDenoisingColored(image, None, 6, 6, 7, 21)
+        """Aplica processamento avançado para detectar QR codes muito pequenos."""
+        # 0. Upscaling para QR codes muito pequenos
+        if self.cfg.use_upscaling:
+            h, w = image.shape[:2]
+            image = cv2.resize(image, (int(w * self.cfg.upscale_factor), int(h * self.cfg.upscale_factor)),
+                             interpolation=cv2.INTER_CUBIC)
         
-        # 2. Sharpening mais agressivo
+        # 1. Reduzir ruído mantendo bordas (mais agressivo)
+        denoised = cv2.fastNlMeansDenoisingColored(image, None, 10, 10, 7, 21)
+        
+        # 2. Sharpening super agressivo
         kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]]) * self.cfg.sharpen_strength
         sharpened = cv2.filter2D(denoised, -1, kernel)
         
-        # 3. Equalização adaptativa (CLAHE) em LAB
-        lab_image = cv2.cvtColor(sharpened, cv2.COLOR_BGR2LAB)
+        # 3. Mórphological operations para fortalecer bordas
+        kernel_morph = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        morph = cv2.morphologyEx(sharpened, cv2.MORPH_CLOSE, kernel_morph, iterations=1)
+        morph = cv2.morphologyEx(morph, cv2.MORPH_OPEN, kernel_morph, iterations=1)
+        
+        # 4. Equalização adaptativa (CLAHE) em LAB
+        lab_image = cv2.cvtColor(morph, cv2.COLOR_BGR2LAB)
         l_channel, a_channel, b_channel = cv2.split(lab_image)
         
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8, 8))  # Más agressivo
         l_channel_eq = clahe.apply(l_channel)
         
         enhanced = cv2.merge([l_channel_eq, a_channel, b_channel])
         rgb_enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2RGB)
         
-        # 4. Aplicar unsharp mask para realçar detalhes
-        gaussian = cv2.GaussianBlur(rgb_enhanced, (0, 0), 2.0)
-        unsharp = cv2.addWeighted(rgb_enhanced, 1.5, gaussian, -0.5, 0)
+        # 5. Unsharp mask duplo para realçar detalhes
+        gaussian1 = cv2.GaussianBlur(rgb_enhanced, (0, 0), 1.0)
+        unsharp1 = cv2.addWeighted(rgb_enhanced, 2.0, gaussian1, -1.0, 0)
         
-        return unsharp
+        gaussian2 = cv2.GaussianBlur(unsharp1, (0, 0), 2.0)
+        unsharp2 = cv2.addWeighted(unsharp1, 1.5, gaussian2, -0.5, 0)
+        
+        # 6. Contrast stretching (normalização de contraste)
+        p2, p98 = np.percentile(unsharp2, (2, 98))
+        if p98 - p2 > 0:
+            final = np.clip((unsharp2 - p2) * 255 / (p98 - p2), 0, 255).astype(np.uint8)
+        else:
+            final = unsharp2.astype(np.uint8)
+        
+        return final
 
     def _process_frame(self, frame: np.ndarray):
-        """Processa o frame com detecção em múltiplas escalas."""
+        """Processa o frame com detecção em múltiplas escalas (inclui QR muito pequenos)."""
         if self.state.is_processing:
             return
 
@@ -174,26 +197,32 @@ class NFCeReader:
 
         try:
             if self.cfg.use_multiscale_detection:
-                # Detecta em múltiplas escalas para melhor cobertura
+                # Detecta em múltiplas escalas para melhor cobertura (especial para pequenos)
                 for scale in self.cfg.scales:
-                    if scale != 1.0:
-                        h, w = rgb_frame.shape[:2]
-                        scaled = cv2.resize(rgb_frame, (int(w * scale), int(h * scale)), 
-                                          interpolation=cv2.INTER_CUBIC if scale > 1 else cv2.INTER_AREA)
-                        detections = self.qreader.detect(image=scaled)
-                        
-                        # Ajustar coordenadas de volta para escala original
-                        for det in detections:
-                            if det.get('bbox_xyxy') is not None:
-                                bbox = det['bbox_xyxy']
-                                det['bbox_xyxy'] = tuple(coord / scale for coord in bbox)
-                                det['scale'] = scale
+                    try:
+                        if scale != 1.0:
+                            h, w = rgb_frame.shape[:2]
+                            scaled = cv2.resize(rgb_frame, (int(w * scale), int(h * scale)), 
+                                              interpolation=cv2.INTER_CUBIC if scale > 1 else cv2.INTER_AREA)
+                            detections = self.qreader.detect(image=scaled)
+                            
+                            # Ajustar coordenadas de volta para escala original
+                            for det in detections:
+                                if det.get('bbox_xyxy') is not None:
+                                    bbox = det['bbox_xyxy']
+                                    det['bbox_xyxy'] = tuple(coord / scale for coord in bbox)
+                                    det['scale'] = scale
+                                    det['confidence'] = det.get('confidence', 1.0)
+                                    all_detections.append(det)
+                        else:
+                            detections = self.qreader.detect(image=rgb_frame)
+                            for det in detections:
+                                det['scale'] = 1.0
+                                det['confidence'] = det.get('confidence', 1.0)
                                 all_detections.append(det)
-                    else:
-                        detections = self.qreader.detect(image=rgb_frame)
-                        for det in detections:
-                            det['scale'] = 1.0
-                            all_detections.append(det)
+                    except Exception as e:
+                        print(f"[Aviso] Escala {scale}: {e}")
+                        continue
             else:
                 # Detecção simples na escala original
                 detections = self.qreader.detect(image=rgb_frame)
@@ -210,14 +239,22 @@ class NFCeReader:
 
                 x1, y1, x2, y2 = map(int, bbox)
                 scale = detection.get('scale', 1.0)
+                confidence = detection.get('confidence', 1.0)
                 
                 # Desenha retângulo com cor baseada na escala
-                color = COLORS['GREEN'] if scale == 1.0 else COLORS['BLUE']
+                if scale < 1.0:
+                    color = COLORS['RED']  # Vermelho para escalas pequenas
+                elif scale == 1.0:
+                    color = COLORS['GREEN']  # Verde para escala original
+                else:
+                    color = COLORS['BLUE']  # Azul para escalas grandes
+                
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
                 
-                # Mostrar escala de detecção
-                cv2.putText(frame, f"{scale:.1f}x", (x1, y1-10), 
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                # Mostrar escala e confiança de detecção
+                info = f"{scale:.2f}x | {int(confidence*100)}%"
+                cv2.putText(frame, info, (x1, y1-10), 
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
                 
                 # Tenta decodificar com múltiplas técnicas
                 self._decode_and_act(rgb_frame, detection, frame)
@@ -277,7 +314,7 @@ class NFCeReader:
         return intersection / union if union > 0 else 0.0
 
     def _decode_and_act(self, image: np.ndarray, detection: Dict[str, Any], display_frame: np.ndarray):
-        """Tenta decodificar QR code com múltiplas técnicas."""
+        """Tenta decodificar QR code com múltiplas técnicas (otimizado para pequenos)."""
         decoded_text = None
         
         try:
@@ -288,15 +325,15 @@ class NFCeReader:
         except Exception as e:
             pass
         
-        # Tentativa 2: Se falhou, tentar com recorte e processamento extra
+        # Tentativa 2: Se falhou, tentar com recorte, expansão e processamento extra
         if not decoded_text:
             try:
                 bbox = detection.get('bbox_xyxy')
                 if bbox:
                     x1, y1, x2, y2 = map(int, bbox)
                     
-                    # Expandir área do QR em 20% para pegar bordas
-                    margin = 0.2
+                    # Expandir área do QR em 30% para pegar bordas (maior margem para pequenos)
+                    margin = 0.3
                     h, w = image.shape[:2]
                     w_bbox = x2 - x1
                     h_bbox = y2 - y1
@@ -310,17 +347,62 @@ class NFCeReader:
                     cropped = image[y1_exp:y2_exp, x1_exp:x2_exp]
                     
                     if cropped.size > 0:
-                        # Aplicar binarização adaptativa
-                        gray = cv2.cvtColor(cropped, cv2.COLOR_RGB2GRAY)
-                        binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                                      cv2.THRESH_BINARY, 11, 2)
-                        rgb_binary = cv2.cvtColor(binary, cv2.COLOR_GRAY2RGB)
+                        # Tentar múltiplas binarizações
+                        binary_methods = [
+                            # Método 1: Binarização adaptativa Gaussiana
+                            cv2.adaptiveThreshold(
+                                cv2.cvtColor(cropped, cv2.COLOR_RGB2GRAY), 255, 
+                                cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
+                            ),
+                            # Método 2: Binarização adaptativa Média
+                            cv2.adaptiveThreshold(
+                                cv2.cvtColor(cropped, cv2.COLOR_RGB2GRAY), 255, 
+                                cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 11, 2
+                            ),
+                            # Método 3: Otsu
+                            cv2.threshold(cv2.cvtColor(cropped, cv2.COLOR_RGB2GRAY), 0, 255, 
+                                        cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
+                        ]
                         
-                        # Tentar decodificar a região binarizada
-                        decoded = self.qreader.detect_and_decode(image=rgb_binary)
+                        for binary in binary_methods:
+                            rgb_binary = cv2.cvtColor(binary, cv2.COLOR_GRAY2RGB)
+                            
+                            try:
+                                decoded = self.qreader.detect_and_decode(image=rgb_binary)
+                                if decoded and len(decoded) > 0 and decoded[0]:
+                                    decoded_text = decoded[0]
+                                    break
+                            except:
+                                continue
+                        
+            except Exception as e:
+                pass
+        
+        # Tentativa 3: Inverter cores se ainda não decodificou (caso inverso branco/preto)
+        if not decoded_text:
+            try:
+                bbox = detection.get('bbox_xyxy')
+                if bbox:
+                    x1, y1, x2, y2 = map(int, bbox)
+                    margin = 0.3
+                    h, w = image.shape[:2]
+                    w_bbox = x2 - x1
+                    h_bbox = y2 - y1
+                    
+                    x1_exp = max(0, int(x1 - w_bbox * margin))
+                    y1_exp = max(0, int(y1 - h_bbox * margin))
+                    x2_exp = min(w, int(x2 + w_bbox * margin))
+                    y2_exp = min(h, int(y2 + h_bbox * margin))
+                    
+                    cropped = image[y1_exp:y2_exp, x1_exp:x2_exp]
+                    
+                    if cropped.size > 0:
+                        # Inverter e tentar novamente
+                        inverted = cv2.bitwise_not(cropped)
+                        decoded = self.qreader.detect_and_decode(image=inverted)
                         if decoded and len(decoded) > 0 and decoded[0]:
                             decoded_text = decoded[0]
-            except Exception as e:
+            except:
                 pass
         
         # Se conseguiu decodificar, processar URL
@@ -329,7 +411,7 @@ class NFCeReader:
             bbox = detection.get('bbox_xyxy')
             if bbox:
                 x1, y1, x2, y2 = map(int, bbox)
-                cv2.putText(display_frame, "LIDO!", (x1, y2+25), 
+                cv2.putText(display_frame, "LIDO! ✓", (x1, y2+25), 
                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, COLORS['GREEN'], 2)
             
             self._handle_url(decoded_text)
@@ -377,12 +459,13 @@ class NFCeReader:
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLORS['WHITE'], 1)
 
     def run(self):
-        print("[Sistema] NFCe Reader OTIMIZADO iniciado!")
+        print("[Sistema] NFCe Reader OTIMIZADO para QR PEQUENOS!")
         print("[Config] Multi-Scale:", "ATIVO" if self.cfg.use_multiscale_detection else "INATIVO")
-        print("[Config] Escalas de detecção:", self.cfg.scales)
+        print("[Config] Escalas:", self.cfg.scales)
+        print("[Config] Upscaling:", "ATIVO (2x)" if self.cfg.use_upscaling else "INATIVO")
         print("[Config] Sharpening:", self.cfg.sharpen_strength)
         print("[Dica] Pressione 'Q' para sair")
-        print("=" * 50)
+        print("=" * 60)
         
         while True:
             ret, frame = self.cap.read()
