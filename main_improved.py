@@ -1,256 +1,181 @@
 """
-Script melhorado para leitura de NFCe via webcam
-Mantém compatibilidade com o script original, mas com melhorias
+Script OTIMIZADO para leitura de NFCe via webcam
+Melhorias: Leitura via QReader (IA) + Processamento Async (Threading)
 """
 
 import cv2
-from pyzbar import pyzbar
+from qreader import QReader # Nova biblioteca
 import subprocess
 import csv
 import os
 import time
 from datetime import datetime
 import sys
+import threading # Para não travar a webcam
+import numpy as np
 
 # Configurações
-CAMERA_INDEX = 1  # Índice da câmera (0 para webcam padrão, 1 para Iriun)
-RESET_DELAY = 5  # Tempo de espera entre leituras em segundos
+CAMERA_INDEX = 1  # Tente 0 se o 1 não abrir
+RESET_DELAY = 3   # Diminuí o delay pois a leitura é mais rápida
 CSV_FILE = "nfc_data.csv"
 
-# Cores para interface (BGR)
+# Cores
 COLOR_GREEN = (0, 255, 0)
 COLOR_RED = (0, 0, 255)
 COLOR_BLUE = (255, 0, 0)
 COLOR_WHITE = (255, 255, 255)
+COLOR_ORANGE = (0, 165, 255)
 
+# Status global para feedback na tela sem travar
+current_status = "Aguardando..."
+status_color = COLOR_WHITE
 
 def init_csv():
-    """Inicializa o arquivo CSV se ele não existir"""
     if not os.path.exists(CSV_FILE):
         with open(CSV_FILE, mode="w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f, delimiter=';')
             writer.writerow(["Estabelecimento", "Produto", "Quantidade", "Unidade", "Valor_Total", "Desconto"])
-        print(f"[✓] Planilha inicializada: {CSV_FILE}")
-    else:
-        print(f"[✓] Usando planilha existente: {CSV_FILE}")
-
 
 def validate_nfce_url(url):
-    """Valida se a URL é de uma NFCe válida"""
-    required_keywords = ['fazenda', 'nfce']
-    return all(keyword in url.lower() for keyword in required_keywords)
+    if not url: return False
+    # Algumas URLs de NFCe podem não ter 'fazenda' explicito dependendo do estado, 
+    # mas 'http' é o mínimo. Ajuste conforme seu estado.
+    return "http" in url.lower() and ("nfce" in url.lower() or "nfe" in url.lower())
 
-
-def process_nfce(url):
-    """Processa uma NFCe via Scrapy"""
-    if not validate_nfce_url(url):
-        print(f"[✗] URL inválida: {url}")
-        return False
+def run_scrapy_thread(url):
+    """Roda o Scrapy em uma thread separada para não travar a UI"""
+    global current_status, status_color
     
-    print(f"[→] Processando NFCe...")
+    current_status = "Processando..."
+    status_color = COLOR_ORANGE
     
-    # Comando Scrapy com proteção para Windows
     comando = f'scrapy crawl nfcedata -a url="{url}"'
     
     try:
-        # Executar Scrapy
-        result = subprocess.Popen(
+        # Nota: shell=True pode ser inseguro em produção, mas ok para uso local
+        result = subprocess.run(
             comando,
-            cwd="nfceReader/",
+            cwd="nfceReader/", # Certifique-se que esta pasta existe
             shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+            capture_output=True,
+            text=True
         )
         
-        # Aguardar conclusão com timeout
-        stdout, stderr = result.communicate(timeout=30)
-        
         if result.returncode == 0:
-            print(f"[✓] NFCe processada com sucesso!")
-            return True
+            current_status = "Sucesso!"
+            status_color = COLOR_GREEN
+            print(f"[✓] Processado: {url[:30]}...")
         else:
-            print(f"[✗] Erro ao processar NFCe")
-            if stderr:
-                print(f"    Detalhes: {stderr.decode('utf-8', errors='ignore')}")
-            return False
+            current_status = "Erro no Scrapy"
+            status_color = COLOR_RED
+            print(f"[✗] Erro Scrapy: {result.stderr}")
             
-    except subprocess.TimeoutExpired:
-        result.kill()
-        print(f"[✗] Timeout ao processar NFCe (>30s)")
-        return False
     except Exception as e:
-        print(f"[✗] Erro: {str(e)}")
-        return False
+        current_status = f"Erro: {str(e)[:15]}"
+        status_color = COLOR_RED
+        print(f"[✗] Exception: {e}")
+    
+    # Reseta o status após 3 segundos
+    time.sleep(3)
+    current_status = "Aguardando..."
+    status_color = COLOR_WHITE
 
-
-def draw_info_panel(frame, last_scan_time, total_scans):
-    """Desenha painel de informações na tela"""
-    height, width = frame.shape[:2]
+def draw_info_panel(frame, fps):
+    global current_status, status_color
     
-    # Fundo semi-transparente
-    overlay = frame.copy()
-    cv2.rectangle(overlay, (10, 10), (width - 10, 120), (0, 0, 0), -1)
-    cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+    # Fundo simples para o texto ficar legível
+    cv2.rectangle(frame, (0, 0), (frame.shape[1], 80), (0, 0, 0), -1)
     
-    # Textos informativos
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    cv2.putText(frame, "NFCe Reader - Webcam Mode", (20, 35), font, 0.7, COLOR_WHITE, 2)
-    cv2.putText(frame, f"Escaneamentos: {total_scans}", (20, 65), font, 0.5, COLOR_GREEN, 1)
+    # Status Principal
+    cv2.putText(frame, f"STATUS: {current_status}", (20, 40), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
     
-    if last_scan_time:
-        time_since = int(time.time() - last_scan_time)
-        cv2.putText(frame, f"Ultimo scan: {time_since}s atras", (20, 90), font, 0.5, COLOR_BLUE, 1)
-    
-    cv2.putText(frame, "Pressione 'Q' para sair | 'S' para stats", (20, 110), font, 0.4, COLOR_WHITE, 1)
-
-
-def show_stats():
-    """Exibe estatísticas dos dados processados"""
-    if not os.path.exists(CSV_FILE):
-        print("\n[!] Nenhum dado encontrado ainda.")
-        return
-    
-    with open(CSV_FILE, mode="r", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f, delimiter=';')
-        data = list(reader)
-    
-    if not data:
-        print("\n[!] Nenhum dado processado ainda.")
-        return
-    
-    # Calcular estatísticas
-    total_items = len(data)
-    estabelecimentos = set()
-    total_valor = 0
-    total_desconto = 0
-    
-    for row in data:
-        estabelecimentos.add(row.get('Estabelecimento', ''))
-        
-        # Processar valor
-        try:
-            valor_str = row.get('Valor_Total', '0').replace('.', '').replace(',', '.')
-            total_valor += float(valor_str) if valor_str else 0
-        except:
-            pass
-        
-        # Processar desconto
-        try:
-            desconto_str = row.get('Desconto', '0').replace('-', '').replace('.', '').replace(',', '.')
-            total_desconto += float(desconto_str) if desconto_str else 0
-        except:
-            pass
-    
-    # Exibir estatísticas
-    print("\n" + "="*60)
-    print("📊 ESTATÍSTICAS DE NOTAS FISCAIS")
-    print("="*60)
-    print(f"🛒 Total de produtos: {total_items}")
-    print(f"🏪 Estabelecimentos diferentes: {len(estabelecimentos)}")
-    print(f"💰 Valor total gasto: R$ {total_valor:.2f}")
-    print(f"🎁 Total de descontos: R$ {total_desconto:.2f}")
-    print(f"💵 Valor líquido: R$ {total_valor - total_desconto:.2f}")
-    print("="*60 + "\n")
-
+    # Info secundária
+    cv2.putText(frame, f"FPS: {int(fps)} | 'Q' Sair | 'S' Stats", (20, 70), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
 
 def main():
-    """Função principal do leitor de QR Code"""
-    print("\n" + "="*60)
-    print("🚀 NFCe Reader - Modo Webcam")
-    print("="*60)
-    print("📋 Configurações:")
-    print(f"   - Câmera: índice {CAMERA_INDEX}")
-    print(f"   - Delay entre leituras: {RESET_DELAY}s")
-    print(f"   - Arquivo de saída: {CSV_FILE}")
-    print("="*60 + "\n")
+    global current_status, status_color
     
-    # Inicializar CSV
+    print("🚀 Iniciando QReader Engine...")
+    
+    # Inicializa o Detector (Modelo AI é baixado na primeira execução)
+    qreader = QReader(model_size='s') 
+    
     init_csv()
     
-    # Tentar abrir a câmera
     cap = cv2.VideoCapture(CAMERA_INDEX)
     
+    # Forçar resolução melhor (Webcams modernas suportam HD/FullHD)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    
     if not cap.isOpened():
-        print(f"[✗] Erro: Não foi possível abrir a câmera no índice {CAMERA_INDEX}")
-        print(f"[!] Tente usar índice 0 (webcam padrão)")
-        return
-    
-    print("[✓] Câmera iniciada com sucesso!")
-    print("[→] Aguardando QR codes...\n")
-    
+        print(f"Erro na câmera {CAMERA_INDEX}. Tentando 0...")
+        cap = cv2.VideoCapture(0)
+
     last_read_time = 0
-    total_scans = 0
+    processing_queue = [] # Evitar processar o mesmo QR seguidamente
     
-    try:
-        while True:
-            ret, frame = cap.read()
-            
-            if not ret:
-                print("[✗] Erro ao capturar frame")
-                continue
-            
-            # Decodificar QR codes
-            qrcodes = pyzbar.decode(frame)
-            current_time = time.time()
-            
-            # Processar QR codes encontrados
-            for qrcode in qrcodes:
-                url = qrcode.data.decode('utf-8')
-                
-                # Desenhar retângulo ao redor do QR code
-                (x, y, w, h) = qrcode.rect
-                cv2.rectangle(frame, (x, y), (x + w, y + h), COLOR_GREEN, 4)
-                
-                # Verificar delay entre leituras
-                if current_time - last_read_time > RESET_DELAY:
-                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] QR Code detectado!")
+    prev_frame_time = 0
+    new_frame_time = 0
+
+    print("[✓] Câmera pronta.")
+
+    while True:
+        ret, frame = cap.read()
+        if not ret: break
+
+        # Cálculo de FPS
+        new_frame_time = time.time()
+        fps = 1/(new_frame_time-prev_frame_time)
+        prev_frame_time = new_frame_time
+
+        # --- DICA DE PERFORMANCE ---
+        # O QReader é rápido, mas processar TODO frame pode pesar em PCs fracos.
+        # Se ficar lento, processe apenas 1 a cada 3 frames.
+        
+        # Converte para RGB (QReader espera RGB, OpenCV usa BGR)
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
+        # Detectar e Decodificar
+        try:
+            decoded_texts = qreader.detect_and_decode(image=rgb_frame)
+        except Exception:
+            decoded_texts = []
+
+        # Se encontrou algo
+        if decoded_texts and decoded_texts[0] is not None:
+            for url in decoded_texts:
+                if url:
+                    # Desenha feedback visual (não temos as coordenadas exatas rect com QReader fácil, 
+                    # então desenhamos uma borda na tela inteira ou apenas notificamos)
+                    cv2.rectangle(frame, (0,0), (frame.shape[1], frame.shape[0]), COLOR_GREEN, 5)
                     
-                    if process_nfce(url):
-                        total_scans += 1
+                    current_time = time.time()
+                    
+                    # Verifica delay e validade
+                    if (current_time - last_read_time > RESET_DELAY) and validate_nfce_url(url):
+                        print(f"\n[Detectado] {url}")
                         last_read_time = current_time
                         
-                        # Feedback visual
-                        cv2.putText(frame, "PROCESSADO!", (x, y - 10), 
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_GREEN, 2)
-                    else:
-                        # Erro no processamento
-                        cv2.putText(frame, "ERRO!", (x, y - 10), 
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_RED, 2)
-            
-            # Desenhar painel de informações
-            draw_info_panel(frame, last_read_time, total_scans)
-            
-            # Mostrar frame
-            cv2.imshow("NFCe Reader", frame)
-            
-            # Verificar teclas pressionadas
-            key = cv2.waitKey(1) & 0xFF
-            
-            if key == ord('q') or key == ord('Q'):
-                print("\n[→] Encerrando...")
-                break
-            elif key == ord('s') or key == ord('S'):
-                show_stats()
-                
-    except KeyboardInterrupt:
-        print("\n[→] Interrompido pelo usuário")
-    
-    finally:
-        # Limpar recursos
-        cap.release()
-        cv2.destroyAllWindows()
-        
-        # Estatísticas finais
-        print("\n" + "="*60)
-        print("✅ Sessão encerrada!")
-        print(f"📊 Total de NFCes processadas: {total_scans}")
-        print(f"💾 Dados salvos em: {CSV_FILE}")
-        print("="*60 + "\n")
+                        # Inicia thread para não travar
+                        t = threading.Thread(target=run_scrapy_thread, args=(url,))
+                        t.daemon = True # Mata a thread se o programa fechar
+                        t.start()
+                    elif not validate_nfce_url(url):
+                         current_status = "QR Code invalido (Nao e NFCe)"
+                         status_color = COLOR_RED
 
+        draw_info_panel(frame, fps)
+        
+        cv2.imshow("NFCe Super Reader", frame)
+
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'): break
+
+    cap.release()
+    cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"\n[✗] Erro fatal: {str(e)}")
-        sys.exit(1)
+    main()
