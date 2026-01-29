@@ -204,6 +204,10 @@ class NFCeSuperReader:
 
         try:
             detections = self.qreader.detect(image=rgb_enhanced)
+            
+            if detections and len(detections) > 0:
+                print(f"[Debug] {len(detections)} QR code(s) detectado(s)")
+            
             crop_x1, crop_y1, _, _ = crop_coords
             target_detection = None
 
@@ -219,7 +223,6 @@ class NFCeSuperReader:
                 bx1, by1, bx2, by2 = map(lambda v: int(v / self.cfg.upscale_factor), bbox)
                 
                 orig_x1, orig_y1 = bx1 + crop_x1, by1 + crop_y1
-                orig_x2, orig_y2 = bx2 + crop_y1, by2 + crop_y1 # Bugfix: bx2 + crop_x1 era o correto, corrigido abaixo
                 orig_x2, orig_y2 = bx2 + crop_x1, by2 + crop_y1
 
                 color = COLORS['YELLOW'] if is_target else COLORS['GRAY']
@@ -239,10 +242,14 @@ class NFCeSuperReader:
     def _decode_target(self, image: np.ndarray, detection: Dict[str, Any]):
         """Decodifica o QR code alvo."""
         try:
+            print("[Debug] Tentando decodificar QR centralizado...")
             decoded = self.qreader.decode(image=image, candidates=[detection])
             if decoded and decoded[0]:
                 url = decoded[0]
+                print(f"[Debug] QR decodificado: {url[:60]}...")
                 self._handle_url(url)
+            else:
+                print("[Debug] Decodificação falhou - QR não legível")
         except Exception as e:
             print(f"[Aviso] Erro decode: {e}")
 
@@ -298,7 +305,10 @@ class NFCeSuperReader:
 
         if self.state.is_processing:
             cv2.putText(frame, "PROCESSANDO...", (w - 250, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLORS['YELLOW'], 2)
-
+        print(f"[Config] Zoom inicial: {self.state.current_zoom}px | Min: {self.cfg.min_zoom} | Max: {self.cfg.max_zoom}")
+        print(f"[Config] Upscale: {self.cfg.upscale_factor}x | Sharpening: {self.cfg.sharpen_strength}")
+        print("[Dica] Use 'W' para afastar (menos zoom) e 'S' para aproximar (mais zoom)")
+        
     def run(self):
         """Loop principal da aplicação."""
         print("[Sistema] Loop iniciado. Pressione 'Q' para sair.")
