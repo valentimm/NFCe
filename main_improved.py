@@ -1,34 +1,37 @@
 """
-Script OTIMIZADO para leitura de NFCe via webcam
-Melhorias: Leitura via QReader (IA) + Processamento Async (Threading)
+Script SUPER OTIMIZADO para NFCes PEQUENAS
+Melhorias: Modelo AI 'Large' + Resolução 1080p + Zoom Digital Central (Crop)
 """
 
 import cv2
-from qreader import QReader # Nova biblioteca
+from qreader import QReader
 import subprocess
 import csv
 import os
 import time
-from datetime import datetime
-import sys
-import threading # Para não travar a webcam
+import threading
 import numpy as np
 
-# Configurações
-CAMERA_INDEX = 1  # Tente 0 se o 1 não abrir
-RESET_DELAY = 3   # Diminuí o delay pois a leitura é mais rápida
+# --- Configurações ---
+CAMERA_INDEX = 1       # Tente 0 ou 1
+RESET_DELAY = 3        # Delay para não ler a mesma nota repetidamente
 CSV_FILE = "nfc_data.csv"
+# Tamanho da área de "zoom" no centro da tela (em pixels)
+CROP_SIZE = 600        
 
-# Cores
+# --- Cores ---
 COLOR_GREEN = (0, 255, 0)
 COLOR_RED = (0, 0, 255)
-COLOR_BLUE = (255, 0, 0)
+COLOR_BLUE = (255, 255, 0) # Ciano para a área de zoom
 COLOR_WHITE = (255, 255, 255)
 COLOR_ORANGE = (0, 165, 255)
 
-# Status global para feedback na tela sem travar
-current_status = "Aguardando..."
+# --- Variáveis Globais de Estado ---
+current_status = "Aguardando QR Code na area azul..."
 status_color = COLOR_WHITE
+is_processing = False # Trava para não tentar processar dois ao mesmo tempo
+
+# ================= FUNÇÕES AUXILIARES =================
 
 def init_csv():
     if not os.path.exists(CSV_FILE):
@@ -37,142 +40,186 @@ def init_csv():
             writer.writerow(["Estabelecimento", "Produto", "Quantidade", "Unidade", "Valor_Total", "Desconto"])
 
 def validate_nfce_url(url):
-    if not url: return False
-    # Algumas URLs de NFCe podem não ter 'fazenda' explicito dependendo do estado, 
-    # mas 'http' é o mínimo. Ajuste conforme seu estado.
-    return "http" in url.lower() and ("nfce" in url.lower() or "nfe" in url.lower())
+    if not url or len(url) < 20: return False
+    url_lower = url.lower()
+    # Validação básica de URL de nota fiscal
+    return "http" in url_lower and ("nfce" in url_lower or "nfe" in url_lower or "fazenda" in url_lower)
 
 def run_scrapy_thread(url):
-    """Roda o Scrapy em uma thread separada para não travar a UI"""
-    global current_status, status_color
+    """Roda o Scrapy sem travar a câmera"""
+    global current_status, status_color, is_processing
     
-    current_status = "Processando..."
+    is_processing = True
+    current_status = "Processando NFCe..."
     status_color = COLOR_ORANGE
     
+    # Substitua 'python' pelo caminho do seu venv se necessário, ex: 'venv/Scripts/python'
     comando = f'scrapy crawl nfcedata -a url="{url}"'
     
     try:
-        # Nota: shell=True pode ser inseguro em produção, mas ok para uso local
-        result = subprocess.run(
+        print(f"[->] Iniciando Scrapy para: {url[:40]}...")
+        # Usando subprocess.Popen para melhor controle em Windows
+        process = subprocess.Popen(
             comando,
-            cwd="nfceReader/", # Certifique-se que esta pasta existe
+            cwd="nfceReader/",
             shell=True,
-            capture_output=True,
-            text=True
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True # Importante para ler como texto e não bytes
         )
         
-        if result.returncode == 0:
-            current_status = "Sucesso!"
+        stdout, stderr = process.communicate(timeout=45) # Timeout maior
+        
+        if process.returncode == 0 and "ERROR" not in stdout:
+            current_status = "Sucesso! Nota salva."
             status_color = COLOR_GREEN
-            print(f"[✓] Processado: {url[:30]}...")
+            print(f"[✓] Scrapy finalizado com sucesso.")
         else:
-            current_status = "Erro no Scrapy"
+            current_status = "Erro na extracao (Scrapy)"
             status_color = COLOR_RED
-            print(f"[✗] Erro Scrapy: {result.stderr}")
-            
-    except Exception as e:
-        current_status = f"Erro: {str(e)[:15]}"
-        status_color = COLOR_RED
-        print(f"[✗] Exception: {e}")
-    
-    # Reseta o status após 3 segundos
-    time.sleep(3)
-    current_status = "Aguardando..."
-    status_color = COLOR_WHITE
+            print(f"[X] Erro Scrapy. Exit code: {process.returncode}")
+            if stderr: print(f"Stderr: {stderr[:200]}...")
 
-def draw_info_panel(frame, fps):
-    global current_status, status_color
+    except subprocess.TimeoutExpired:
+        process.kill()
+        current_status = "Erro: Timeout (>45s)"
+        status_color = COLOR_RED
+        print("[X] Timeout no Scrapy")
+    except Exception as e:
+        current_status = f"Erro sistema: {str(e)[:20]}"
+        status_color = COLOR_RED
+        print(f"[X] Exceção: {e}")
+    finally:
+        time.sleep(2)
+        current_status = "Aguardando QR Code na area azul..."
+        status_color = COLOR_WHITE
+        is_processing = False
+
+def draw_interface(frame, fps, crop_rect):
+    """Desenha as informações e a área de zoom na tela"""
+    h, w, _ = frame.shape
     
-    # Fundo simples para o texto ficar legível
-    cv2.rectangle(frame, (0, 0), (frame.shape[1], 80), (0, 0, 0), -1)
+    # 1. Desenha o retângulo da área de zoom (onde o usuário deve mirar)
+    cv2.rectangle(frame, (crop_rect[0], crop_rect[1]), (crop_rect[2], crop_rect[3]), COLOR_BLUE, 2)
+    cv2.putText(frame, "AREA DE LEITURA (ZOOM)", (crop_rect[0], crop_rect[1]-10), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_BLUE, 2)
+
+    # 2. Barra de Status Superior
+    cv2.rectangle(frame, (0, 0), (w, 60), (0, 0, 0), -1)
+    cv2.putText(frame, f"STATUS: {current_status}", (20, 35), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
     
-    # Status Principal
-    cv2.putText(frame, f"STATUS: {current_status}", (20, 40), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
-    
-    # Info secundária
-    cv2.putText(frame, f"FPS: {int(fps)} | 'Q' Sair | 'S' Stats", (20, 70), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+    # 3. Info de FPS e Ajuda
+    cv2.putText(frame, f"FPS: {int(fps)} | Resolucao: {w}x{h} | 'Q' para Sair", (20, h - 20), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_WHITE, 2, cv2.LINE_AA)
+    if is_processing:
+         cv2.putText(frame, "PROCESSANDO... AGUARDE", (w - 300, h - 20), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_ORANGE, 2, cv2.LINE_AA)
+
+# ================= LOOP PRINCIPAL =================
 
 def main():
-    global current_status, status_color
+    global current_status, status_color, is_processing
     
-    print("🚀 Iniciando QReader Engine...")
-    
-    # Inicializa o Detector (Modelo AI é baixado na primeira execução)
-    qreader = QReader(model_size='s') 
-    
+    # MUDANÇA 1: Usando o modelo 'l' (Large) para maior precisão em códigos difíceis
+    print("🚀 Carregando modelo de IA 'Large' (pode demorar um pouco na 1ª vez)...")
+    qreader = QReader(model_size='l') 
+    print("[✓] Modelo carregado.")
+
     init_csv()
     
     cap = cv2.VideoCapture(CAMERA_INDEX)
     
-    # Forçar resolução melhor (Webcams modernas suportam HD/FullHD)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    # MUDANÇA 2: Tentando forçar FULL HD (1080p)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
     
+    # Verifica a resolução real que a câmera conseguiu pegar
+    real_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    real_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    print(f"[i] Resolução da câmera definida para: {real_w}x{real_h}")
+    
+    if real_w < 1280:
+        print("[!] AVISO: Sua câmera não suporta alta resolução. Códigos pequenos serão difíceis.")
+
     if not cap.isOpened():
-        print(f"Erro na câmera {CAMERA_INDEX}. Tentando 0...")
-        cap = cv2.VideoCapture(0)
+        print(f"Erro na câmera {CAMERA_INDEX}. Verifique a conexão.")
+        return
 
     last_read_time = 0
-    processing_queue = [] # Evitar processar o mesmo QR seguidamente
-    
     prev_frame_time = 0
-    new_frame_time = 0
-
-    print("[✓] Câmera pronta.")
+    frame_count = 0
 
     while True:
         ret, frame = cap.read()
         if not ret: break
+        
+        frame_count += 1
+        h, w, _ = frame.shape
 
         # Cálculo de FPS
         new_frame_time = time.time()
-        fps = 1/(new_frame_time-prev_frame_time)
+        fps = 1/(new_frame_time-prev_frame_time) if prev_frame_time > 0 else 0
         prev_frame_time = new_frame_time
 
-        # --- DICA DE PERFORMANCE ---
-        # O QReader é rápido, mas processar TODO frame pode pesar em PCs fracos.
-        # Se ficar lento, processe apenas 1 a cada 3 frames.
+        # MUDANÇA 3: CÁLCULO DO ZOOM DIGITAL (CROP)
+        # Definir coordenadas para cortar o centro da imagem
+        center_x, center_y = w // 2, h // 2
+        x1 = max(0, center_x - CROP_SIZE // 2)
+        y1 = max(0, center_y - CROP_SIZE // 2)
+        x2 = min(w, center_x + CROP_SIZE // 2)
+        y2 = min(h, center_y + CROP_SIZE // 2)
+        crop_rect = (x1, y1, x2, y2)
         
-        # Converte para RGB (QReader espera RGB, OpenCV usa BGR)
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # Criar a imagem "zoomada" cortando o frame original
+        cropped_frame = frame[y1:y2, x1:x2]
         
-        # Detectar e Decodificar
-        try:
-            decoded_texts = qreader.detect_and_decode(image=rgb_frame)
-        except Exception:
-            decoded_texts = []
+        decoded_text = None
+        
+        # Otimização: Não roda a IA em todo frame se estiver processando ou se o FPS estiver baixo
+        # Roda a cada 2 frames para aliviar a CPU
+        if not is_processing and frame_count % 2 == 0:
+            # Converter o CROP para RGB para o QReader
+            rgb_crop = cv2.cvtColor(cropped_frame, cv2.COLOR_BGR2RGB)
+            try:
+                # Passamos apenas a imagem cortada (zoom) para a IA
+                decoded = qreader.detect_and_decode(image=rgb_crop)
+                if decoded and decoded[0] is not None:
+                    decoded_text = decoded[0]
+            except Exception as e:
+                print(f"Erro na detecção: {e}")
 
-        # Se encontrou algo
-        if decoded_texts and decoded_texts[0] is not None:
-            for url in decoded_texts:
-                if url:
-                    # Desenha feedback visual (não temos as coordenadas exatas rect com QReader fácil, 
-                    # então desenhamos uma borda na tela inteira ou apenas notificamos)
-                    cv2.rectangle(frame, (0,0), (frame.shape[1], frame.shape[0]), COLOR_GREEN, 5)
+        # Lógica de detecção bem sucedida
+        if decoded_text:
+            current_time = time.time()
+            if (current_time - last_read_time > RESET_DELAY):
+                
+                if validate_nfce_url(decoded_text):
+                    # Feedback visual imediato
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), COLOR_GREEN, 3)
                     
-                    current_time = time.time()
+                    print(f"\n[>>>] URL Detectada: {decoded_text}")
+                    last_read_time = current_time
                     
-                    # Verifica delay e validade
-                    if (current_time - last_read_time > RESET_DELAY) and validate_nfce_url(url):
-                        print(f"\n[Detectado] {url}")
-                        last_read_time = current_time
-                        
-                        # Inicia thread para não travar
-                        t = threading.Thread(target=run_scrapy_thread, args=(url,))
-                        t.daemon = True # Mata a thread se o programa fechar
-                        t.start()
-                    elif not validate_nfce_url(url):
-                         current_status = "QR Code invalido (Nao e NFCe)"
-                         status_color = COLOR_RED
+                    # Inicia thread do Scrapy
+                    t = threading.Thread(target=run_scrapy_thread, args=(decoded_text,))
+                    t.daemon = True
+                    t.start()
+                else:
+                     current_status = "QR Code lido, mas nao e NFCe valida."
+                     status_color = COLOR_RED
 
-        draw_info_panel(frame, fps)
+        # Desenha a interface final no frame original
+        draw_interface(frame, fps, crop_rect)
         
-        cv2.imshow("NFCe Super Reader", frame)
+        # Opcional: Mostrar o que a IA está vendo (o zoom) em outra janela para debug
+        # cv2.imshow("Visao da IA (Zoom)", cropped_frame)
+        
+        cv2.imshow("Leitor NFCe Otimizado", frame)
 
         key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'): break
+        if key == ord('q') or key == 27: # 'q' ou ESC
+            break
 
     cap.release()
     cv2.destroyAllWindows()
