@@ -29,12 +29,18 @@ class Config:
     # Delay para evitar leituras duplicadas (em segundos)
     reset_delay: int = 4
     
-    # Processamento de Imagem (Apenas realce, sem upscale)
-    sharpen_strength: float = 1.0
+    # Processamento de Imagem Avançado
+    sharpen_strength: float = 1.5
+    use_adaptive_processing: bool = True
+    use_multiscale_detection: bool = True
+    scales: Tuple[float, ...] = (1.0, 1.5, 0.75)  # Escalas para detecção
     
     # Resolução da Câmera
     cam_width: int = 1920
     cam_height: int = 1080
+    
+    # Performance
+    fps_target: int = 30  # FPS alvo da câmera
 
 @dataclass
 class AppState:
@@ -76,16 +82,21 @@ class NFCeReader:
 
     def _init_camera(self):
         print(f"[Sistema] Iniciando Câmera {self.cfg.camera_index}...")
-        self.cap = cv2.VideoCapture(self.cfg.camera_index)
+        self.cap = cv2.VideoCapture(self.cfg.camera_index, cv2.CAP_DSHOW)  # DirectShow no Windows
         if not self.cap.isOpened():
             raise RuntimeError(f"Não foi possível abrir a câmera {self.cfg.camera_index}")
         
+        # Configurações otimizadas
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cfg.cam_width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cfg.cam_height)
+        self.cap.set(cv2.CAP_PROP_FPS, self.cfg.fps_target)
+        self.cap.set(cv2.CAP_PROP_AUTOFOCUS, 1)  # Autofoco ativo
+        self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)  # Auto-exposição
         
         w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        print(f"[Sistema] Resolução: {w}x{h}")
+        fps = int(self.cap.get(cv2.CAP_PROP_FPS))
+        print(f"[Sistema] Resolução: {w}x{h} @ {fps}fps")
 
     def _run_scrapy_thread(self, url: str):
         self.state.is_processing = True
@@ -128,57 +139,200 @@ class NFCeReader:
             self.state.color = COLORS['GREEN']
 
     def _enhance_frame(self, image: np.ndarray) -> np.ndarray:
-        """Aplica apenas nitidez e contraste. Sem upscale pesado."""
-        # 1. Sharpening leve
-        kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]]) * self.cfg.sharpen_strength
-        sharpened = cv2.filter2D(image, -1, kernel)
+        """Aplica processamento avançado para melhorar detecção de QR codes."""
+        # 1. Reduzir ruído mantendo bordas
+        denoised = cv2.fastNlMeansDenoisingColored(image, None, 6, 6, 7, 21)
         
-        # 2. Contraste (CLAHE) apenas no canal de luminosidade
+        # 2. Sharpening mais agressivo
+        kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]]) * self.cfg.sharpen_strength
+        sharpened = cv2.filter2D(denoised, -1, kernel)
+        
+        # 3. Equalização adaptativa (CLAHE) em LAB
         lab_image = cv2.cvtColor(sharpened, cv2.COLOR_BGR2LAB)
         l_channel, a_channel, b_channel = cv2.split(lab_image)
         
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
         l_channel_eq = clahe.apply(l_channel)
         
         enhanced = cv2.merge([l_channel_eq, a_channel, b_channel])
-        return cv2.cvtColor(enhanced, cv2.COLOR_LAB2RGB) # Retorna RGB para o QReader
+        rgb_enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2RGB)
+        
+        # 4. Aplicar unsharp mask para realçar detalhes
+        gaussian = cv2.GaussianBlur(rgb_enhanced, (0, 0), 2.0)
+        unsharp = cv2.addWeighted(rgb_enhanced, 1.5, gaussian, -0.5, 0)
+        
+        return unsharp
 
     def _process_frame(self, frame: np.ndarray):
-        """Processa o frame inteiro."""
+        """Processa o frame com detecção em múltiplas escalas."""
         if self.state.is_processing:
             return
 
-        # Prepara imagem (filtro + converte RGB)
+        # Prepara imagem base
         rgb_frame = self._enhance_frame(frame)
+        all_detections = []
 
         try:
-            # Detecta no frame inteiro
-            detections = self.qreader.detect(image=rgb_frame)
+            if self.cfg.use_multiscale_detection:
+                # Detecta em múltiplas escalas para melhor cobertura
+                for scale in self.cfg.scales:
+                    if scale != 1.0:
+                        h, w = rgb_frame.shape[:2]
+                        scaled = cv2.resize(rgb_frame, (int(w * scale), int(h * scale)), 
+                                          interpolation=cv2.INTER_CUBIC if scale > 1 else cv2.INTER_AREA)
+                        detections = self.qreader.detect(image=scaled)
+                        
+                        # Ajustar coordenadas de volta para escala original
+                        for det in detections:
+                            if det.get('bbox_xyxy') is not None:
+                                bbox = det['bbox_xyxy']
+                                det['bbox_xyxy'] = tuple(coord / scale for coord in bbox)
+                                det['scale'] = scale
+                                all_detections.append(det)
+                    else:
+                        detections = self.qreader.detect(image=rgb_frame)
+                        for det in detections:
+                            det['scale'] = 1.0
+                            all_detections.append(det)
+            else:
+                # Detecção simples na escala original
+                detections = self.qreader.detect(image=rgb_frame)
+                all_detections = detections
             
-            for detection in detections:
+            # Remover duplicatas (QR codes detectados em múltiplas escalas)
+            unique_detections = self._remove_duplicate_detections(all_detections)
+            
+            # Processar cada detecção única
+            for detection in unique_detections:
                 bbox = detection.get('bbox_xyxy')
                 if bbox is None: 
                     continue
 
                 x1, y1, x2, y2 = map(int, bbox)
+                scale = detection.get('scale', 1.0)
                 
-                # Desenha o quadrado
-                cv2.rectangle(frame, (x1, y1), (x2, y2), self.state.color, 3)
+                # Desenha retângulo com cor baseada na escala
+                color = COLORS['GREEN'] if scale == 1.0 else COLORS['BLUE']
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
                 
-                # Tenta decodificar este QR específico
-                self._decode_and_act(rgb_frame, detection)
+                # Mostrar escala de detecção
+                cv2.putText(frame, f"{scale:.1f}x", (x1, y1-10), 
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                
+                # Tenta decodificar com múltiplas técnicas
+                self._decode_and_act(rgb_frame, detection, frame)
                 
         except Exception as e:
-            print(f"[Aviso] Erro loop: {e}")
+            print(f"[Aviso] Erro no processamento: {e}")
+    
+    def _remove_duplicate_detections(self, detections: list) -> list:
+        """Remove detecções duplicadas usando IoU (Intersection over Union)."""
+        if len(detections) <= 1:
+            return detections
+        
+        unique = []
+        for det in detections:
+            bbox1 = det.get('bbox_xyxy')
+            if bbox1 is None:
+                continue
+            
+            is_duplicate = False
+            for unique_det in unique:
+                bbox2 = unique_det.get('bbox_xyxy')
+                if bbox2 is None:
+                    continue
+                
+                # Calcular IoU
+                iou = self._calculate_iou(bbox1, bbox2)
+                if iou > 0.5:  # 50% de sobreposição = duplicata
+                    is_duplicate = True
+                    break
+            
+            if not is_duplicate:
+                unique.append(det)
+        
+        return unique
+    
+    def _calculate_iou(self, bbox1: tuple, bbox2: tuple) -> float:
+        """Calcula Intersection over Union entre dois bounding boxes."""
+        x1_1, y1_1, x2_1, y2_1 = bbox1
+        x1_2, y1_2, x2_2, y2_2 = bbox2
+        
+        # Área de interseção
+        x1_i = max(x1_1, x1_2)
+        y1_i = max(y1_1, y1_2)
+        x2_i = min(x2_1, x2_2)
+        y2_i = min(y2_1, y2_2)
+        
+        if x2_i < x1_i or y2_i < y1_i:
+            return 0.0
+        
+        intersection = (x2_i - x1_i) * (y2_i - y1_i)
+        
+        # Área de união
+        area1 = (x2_1 - x1_1) * (y2_1 - y1_1)
+        area2 = (x2_2 - x1_2) * (y2_2 - y1_2)
+        union = area1 + area2 - intersection
+        
+        return intersection / union if union > 0 else 0.0
 
-    def _decode_and_act(self, image: np.ndarray, detection: Dict[str, Any]):
+    def _decode_and_act(self, image: np.ndarray, detection: Dict[str, Any], display_frame: np.ndarray):
+        """Tenta decodificar QR code com múltiplas técnicas."""
+        decoded_text = None
+        
         try:
+            # Tentativa 1: Decodificação direta
             decoded = self.qreader.decode(image=image, candidates=[detection])
             if decoded and decoded[0]:
-                url = decoded[0]
-                self._handle_url(url)
-        except Exception:
+                decoded_text = decoded[0]
+        except Exception as e:
             pass
+        
+        # Tentativa 2: Se falhou, tentar com recorte e processamento extra
+        if not decoded_text:
+            try:
+                bbox = detection.get('bbox_xyxy')
+                if bbox:
+                    x1, y1, x2, y2 = map(int, bbox)
+                    
+                    # Expandir área do QR em 20% para pegar bordas
+                    margin = 0.2
+                    h, w = image.shape[:2]
+                    w_bbox = x2 - x1
+                    h_bbox = y2 - y1
+                    
+                    x1_exp = max(0, int(x1 - w_bbox * margin))
+                    y1_exp = max(0, int(y1 - h_bbox * margin))
+                    x2_exp = min(w, int(x2 + w_bbox * margin))
+                    y2_exp = min(h, int(y2 + h_bbox * margin))
+                    
+                    # Recortar região
+                    cropped = image[y1_exp:y2_exp, x1_exp:x2_exp]
+                    
+                    if cropped.size > 0:
+                        # Aplicar binarização adaptativa
+                        gray = cv2.cvtColor(cropped, cv2.COLOR_RGB2GRAY)
+                        binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                                      cv2.THRESH_BINARY, 11, 2)
+                        rgb_binary = cv2.cvtColor(binary, cv2.COLOR_GRAY2RGB)
+                        
+                        # Tentar decodificar a região binarizada
+                        decoded = self.qreader.detect_and_decode(image=rgb_binary)
+                        if decoded and len(decoded) > 0 and decoded[0]:
+                            decoded_text = decoded[0]
+            except Exception as e:
+                pass
+        
+        # Se conseguiu decodificar, processar URL
+        if decoded_text:
+            # Feedback visual de sucesso
+            bbox = detection.get('bbox_xyxy')
+            if bbox:
+                x1, y1, x2, y2 = map(int, bbox)
+                cv2.putText(display_frame, "LIDO!", (x1, y2+25), 
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.8, COLORS['GREEN'], 2)
+            
+            self._handle_url(decoded_text)
 
     def _handle_url(self, url: str):
         current_time = time.time()
@@ -201,19 +355,34 @@ class NFCeReader:
     def _draw_hud(self, frame: np.ndarray):
         h, w = frame.shape[:2]
         
-        # Barra de fundo
-        cv2.rectangle(frame, (0, 0), (w, 50), COLORS['BLACK'], -1)
+        # Barra superior expandida
+        cv2.rectangle(frame, (0, 0), (w, 60), COLORS['BLACK'], -1)
         
         # Texto Status
         cv2.putText(frame, self.state.status, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 
-                   1.0, self.state.color, 2)
+                   0.9, self.state.color, 2)
+        
+        # Info de detecção
+        info = f"Multi-Scale: {'ON' if self.cfg.use_multiscale_detection else 'OFF'} | FPS: {int(self.cap.get(cv2.CAP_PROP_FPS))}"
+        cv2.putText(frame, info, (20, 55), cv2.FONT_HERSHEY_SIMPLEX, 
+                   0.4, COLORS['WHITE'], 1)
         
         if self.state.is_processing:
             cv2.putText(frame, "PROCESSANDO...", (w - 250, 35), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, COLORS['BLUE'], 2)
+        
+        # Legenda de cores (canto inferior direito)
+        legend_y = h - 40
+        cv2.putText(frame, "Verde: 1.0x | Azul: Outras escalas", (w - 350, legend_y), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLORS['WHITE'], 1)
 
     def run(self):
-        print("[Sistema] Leitura Full-Screen iniciada. 'Q' para sair.")
+        print("[Sistema] NFCe Reader OTIMIZADO iniciado!")
+        print("[Config] Multi-Scale:", "ATIVO" if self.cfg.use_multiscale_detection else "INATIVO")
+        print("[Config] Escalas de detecção:", self.cfg.scales)
+        print("[Config] Sharpening:", self.cfg.sharpen_strength)
+        print("[Dica] Pressione 'Q' para sair")
+        print("=" * 50)
         
         while True:
             ret, frame = self.cap.read()

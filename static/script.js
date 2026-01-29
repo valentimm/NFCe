@@ -10,8 +10,7 @@ const state = {
     qrScanner: null,
     isScannerActive: false,
     isFlashOn: false,
-    videoTrack: null,
-    zoomLevel: 0.5 // 50% (0.3 = 30%, 1.0 = 100%)
+    videoTrack: null
 };
 
 // Elementos do DOM
@@ -23,10 +22,6 @@ const elements = {
     startScanBtn: document.getElementById('startScanBtn'),
     stopScanBtn: document.getElementById('stopScanBtn'),
     toggleFlashBtn: document.getElementById('toggleFlashBtn'),
-    zoomControls: document.getElementById('zoomControls'),
-    zoomInBtn: document.getElementById('zoomInBtn'),
-    zoomOutBtn: document.getElementById('zoomOutBtn'),
-    zoomLevel: document.getElementById('zoomLevel'),
     scanResult: document.getElementById('scanResult'),
     scannedUrl: document.getElementById('scannedUrl'),
     
@@ -105,17 +100,6 @@ function initEventListeners() {
         console.log('✅ Listener do toggleFlashBtn registrado');
     }
     
-    // Zoom controls
-    if (elements.zoomInBtn) {
-        elements.zoomInBtn.addEventListener('click', () => zoomAdjust(0.1));
-        console.log('✅ Listener do zoomInBtn registrado');
-    }
-    
-    if (elements.zoomOutBtn) {
-        elements.zoomOutBtn.addEventListener('click', () => zoomAdjust(-0.1));
-        console.log('✅ Listener do zoomOutBtn registrado');
-    }
-    
     // Modal controls
     elements.viewDataBtn.addEventListener('click', openModal);
     elements.closeModal.addEventListener('click', closeModal);
@@ -161,13 +145,13 @@ async function startQRScanner() {
         // Limpar placeholder
         elements.qrReader.innerHTML = '';
         
-        // Configurar scanner otimizado para QR codes pequenos
+        // Configurar scanner com área de detecção fixa
         const config = {
-            fps: 10, // Reduzido para melhor processamento
+            fps: 10,
             qrbox: function(viewfinderWidth, viewfinderHeight) {
-                // Área flexível baseada no zoom do usuário
+                // Área fixa de 70% da menor dimensão
                 let minEdge = Math.min(viewfinderWidth, viewfinderHeight);
-                let qrboxSize = Math.floor(minEdge * state.zoomLevel);
+                let qrboxSize = Math.floor(minEdge * 0.7);
                 return {
                     width: qrboxSize,
                     height: qrboxSize
@@ -208,11 +192,7 @@ async function startQRScanner() {
         elements.startScanBtn.style.display = 'none';
         elements.stopScanBtn.style.display = 'inline-flex';
         elements.toggleFlashBtn.style.display = 'inline-flex';
-        elements.zoomControls.style.display = 'flex'; // Mostrar controles de zoom
         elements.scanResult.style.display = 'none';
-        
-        // Atualizar display do zoom
-        updateZoomDisplay();
         
         // Salvar video track para controlar flash
         setTimeout(() => {
@@ -363,7 +343,6 @@ async function stopQRScanner() {
             elements.stopScanBtn.style.display = 'none';
             elements.toggleFlashBtn.style.display = 'none';
             elements.toggleFlashBtn.classList.remove('active');
-            elements.zoomControls.style.display = 'none'; // Ocultar zoom
             
             // Restaurar placeholder
             elements.qrReader.innerHTML = '<div class="qr-reader-placeholder"><div class="camera-icon">📷</div><p>Clique em "Iniciar Scanner" para começar</p></div>';
@@ -372,87 +351,6 @@ async function stopQRScanner() {
         }
     } catch (err) {
         console.error('Erro ao parar scanner:', err);
-    }
-}
-
-/**
- * Ajustar zoom da área de detecção
- */
-function zoomAdjust(delta) {
-    state.zoomLevel = Math.max(0.3, Math.min(1.0, state.zoomLevel + delta));
-    updateZoomDisplay();
-    
-    if (state.isScannerActive && state.qrScanner) {
-        // Reiniciar scanner com novo zoom
-        console.log(`🔍 Zoom ajustado para ${Math.round(state.zoomLevel * 100)}%`);
-        showAlert(`🔍 Zoom: ${Math.round(state.zoomLevel * 100)}%`, 'info');
-        
-        // Parar e reiniciar para aplicar novo tamanho
-        restartScannerWithNewZoom();
-    }
-}
-
-/**
- * Atualizar display do nível de zoom
- */
-function updateZoomDisplay() {
-    if (elements.zoomLevel) {
-        elements.zoomLevel.textContent = `${Math.round(state.zoomLevel * 100)}%`;
-    }
-}
-
-/**
- * Reiniciar scanner com novo zoom
- */
-async function restartScannerWithNewZoom() {
-    try {
-        const wasProcessing = state.isProcessing;
-        
-        // Parar scanner atual
-        if (state.qrScanner && state.isScannerActive) {
-            await state.qrScanner.stop();
-            state.qrScanner.clear();
-        }
-        
-        // Limpar área
-        elements.qrReader.innerHTML = '';
-        
-        // Reconfigurar com novo zoom
-        const config = {
-            fps: 10,
-            qrbox: function(viewfinderWidth, viewfinderHeight) {
-                let minEdge = Math.min(viewfinderWidth, viewfinderHeight);
-                let qrboxSize = Math.floor(minEdge * state.zoomLevel);
-                return {
-                    width: qrboxSize,
-                    height: qrboxSize
-                };
-            },
-            aspectRatio: 1.0,
-            disableFlip: false,
-            experimentalFeatures: {
-                useBarCodeDetectorIfSupported: true
-            },
-            formatsToSupport: [
-                Html5QrcodeSupportedFormats.QR_CODE
-            ]
-        };
-        
-        state.qrScanner = new Html5Qrcode("qr-reader");
-        
-        await state.qrScanner.start(
-            { facingMode: "environment" },
-            config,
-            onScanSuccess,
-            onScanError
-        );
-        
-        state.isProcessing = wasProcessing;
-        console.log('✅ Scanner reiniciado com novo zoom');
-        
-    } catch (err) {
-        console.error('❌ Erro ao reiniciar scanner:', err);
-        showAlert('❌ Erro ao ajustar zoom', 'error');
     }
 }
 
